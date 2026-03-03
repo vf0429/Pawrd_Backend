@@ -1,0 +1,11 @@
+./auth.go
+./chat.go
+./clinics.go
+./cors.go
+./insurance.go
+./insurance_v1.go
+./posts.go
+./rag.go
+./register.go
+./vaccines.go
+./vets.go

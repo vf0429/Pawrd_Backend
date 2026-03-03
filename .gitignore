@@ -5,6 +5,7 @@ petwell_server
 
 # Database files
 *.db
+!assets/pet_insurance.db
 *.sqbpro
 
 # OS files

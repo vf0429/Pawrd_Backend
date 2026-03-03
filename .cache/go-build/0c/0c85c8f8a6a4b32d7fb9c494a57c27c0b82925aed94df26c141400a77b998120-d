@@ -1,0 +1,16 @@
+./client.go
+./directions.go
+./distancematrix.go
+./doc.go
+./elevation.go
+./encoding.go
+./geocoding.go
+./geolocation.go
+./latlng.go
+./places.go
+./polyline.go
+./roads.go
+./staticmap.go
+./timezone.go
+./transport.go
+./types.go
