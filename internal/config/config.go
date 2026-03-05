@@ -17,6 +17,7 @@ type Config struct {
 	DBName                 string
 	ShopifyDomain          string
 	ShopifyStorefrontToken string
+	UseMockShopify         bool
 }
 
 func LoadConfig() *Config {
@@ -39,6 +40,7 @@ func LoadConfig() *Config {
 		DBName:                 getEnvOrDefault("DB_NAME", "petwell"),
 		ShopifyDomain:          os.Getenv("SHOPIFY_DOMAIN"),
 		ShopifyStorefrontToken: os.Getenv("SHOPIFY_STOREFRONT_TOKEN"),
+		UseMockShopify:         os.Getenv("USE_MOCK_SHOPIFY") == "true",
 	}
 }
 

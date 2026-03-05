@@ -31,6 +31,12 @@ type ProductsResponse struct {
 	NextCursor string        `json:"nextCursor,omitempty"`
 }
 
+// ShopifyClient interface allows both real and mock clients
+type ShopifyClient interface {
+	FetchProducts(first int, after string) ([]shopify.Product, bool, string, error)
+	FetchProductByHandle(handle string) (*shopify.Product, error)
+}
+
 // NewShopHandler creates a handler for shop endpoints
 func NewShopHandler(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -43,11 +49,18 @@ func NewShopHandler(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		// Initialize Shopify client
-		client, err := shopify.NewClient(cfg)
-		if err != nil {
-			http.Error(w, "Shopify configuration error: "+err.Error(), http.StatusInternalServerError)
-			return
+		// Initialize Shopify client (real or mock)
+		var client ShopifyClient
+		var err error
+
+		if cfg.UseMockShopify {
+			client = shopify.NewMockClient()
+		} else {
+			client, err = shopify.NewClient(cfg)
+			if err != nil {
+				http.Error(w, "Shopify configuration error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 
 		// Parse query parameters
@@ -107,11 +120,18 @@ func NewShopProductDetailHandler(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		// Initialize Shopify client
-		client, err := shopify.NewClient(cfg)
-		if err != nil {
-			http.Error(w, "Shopify configuration error: "+err.Error(), http.StatusInternalServerError)
-			return
+		// Initialize Shopify client (real or mock)
+		var client ShopifyClient
+		var err error
+
+		if cfg.UseMockShopify {
+			client = shopify.NewMockClient()
+		} else {
+			client, err = shopify.NewClient(cfg)
+			if err != nil {
+				http.Error(w, "Shopify configuration error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 
 		// Fetch product by handle
