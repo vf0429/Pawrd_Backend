@@ -89,6 +89,9 @@ func main() {
 	// Shop handlers
 	mux.HandleFunc("/api/shop/products", handlers.NewShopHandler(cfg))
 
+	// Blog handlers
+	mux.HandleFunc("/api/posts", handlers.NewBlogHandler(db))
+
 	// Mount Gin engine onto standard mux
 	// We handle both /api/v1 and /api/v1/ to be safe
 	v1Handler := http.StripPrefix("/api/v1", insuranceV1Router)
