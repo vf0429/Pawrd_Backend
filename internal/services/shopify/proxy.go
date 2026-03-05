@@ -155,6 +155,64 @@ func (c *Client) FetchProducts(first int, after string) ([]Product, bool, string
 	return products, response.Products.PageInfo.HasNextPage, response.Products.PageInfo.EndCursor, nil
 }
 
+// SearchProducts queries Shopify with a full-text search string
+func (c *Client) SearchProducts(query string, first int) ([]Product, error) {
+	if first <= 0 {
+		first = 20
+	}
+	if first > 100 {
+		first = 100
+	}
+
+	gqlQuery := `
+		query SearchProducts($first: Int!, $query: String!) {
+			products(first: $first, query: $query) {
+				edges {
+					node {
+						id title description handle productType vendor tags createdAt updatedAt
+						priceRange {
+							minVariantPrice { amount currencyCode }
+							maxVariantPrice { amount currencyCode }
+						}
+						images(first: 5) { edges { node { id url altText width height } } }
+						variants(first: 5) {
+							edges { node { id title sku price { amount currencyCode } availableForSale } }
+						}
+					}
+				}
+			}
+		}
+	`
+
+	payload := map[string]interface{}{
+		"query":     gqlQuery,
+		"variables": map[string]interface{}{"first": first, "query": query},
+	}
+
+	data, err := c.executeGraphQL(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	var response struct {
+		Products struct {
+			Edges []struct {
+				Node rawProduct `json:"node"`
+			} `json:"edges"`
+		} `json:"products"`
+	}
+
+	if err := json.Unmarshal(data, &response); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal search results: %w", err)
+	}
+
+	products := make([]Product, 0, len(response.Products.Edges))
+	for _, edge := range response.Products.Edges {
+		products = append(products, edge.Node.toProduct())
+	}
+	return products, nil
+}
+
 // FetchProductByHandle retrieves a single product by its handle
 func (c *Client) FetchProductByHandle(handle string) (*Product, error) {
 	query := `

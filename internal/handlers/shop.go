@@ -35,6 +35,7 @@ type ProductsResponse struct {
 type ShopifyClient interface {
 	FetchProducts(first int, after string) ([]shopify.Product, bool, string, error)
 	FetchProductByHandle(handle string) (*shopify.Product, error)
+	SearchProducts(query string, first int) ([]shopify.Product, error)
 }
 
 // NewShopHandler creates a handler for shop endpoints
@@ -143,6 +144,60 @@ func NewShopProductDetailHandler(cfg *config.Config) http.HandlerFunc {
 		// Return response
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(transformProduct(*product))
+	}
+}
+
+// NewShopSearchHandler handles GET /api/shop/search?q=...
+func NewShopSearchHandler(cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		EnableCors(&w)
+		if r.Method == http.MethodOptions {
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		query := r.URL.Query().Get("q")
+		if query == "" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]ShopProduct{})
+			return
+		}
+
+		first := 20
+		if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+			if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 && parsed <= 100 {
+				first = parsed
+			}
+		}
+
+		var client ShopifyClient
+		var err error
+		if cfg.UseMockShopify {
+			client = shopify.NewMockClient()
+		} else {
+			client, err = shopify.NewClient(cfg)
+			if err != nil {
+				http.Error(w, "Shopify configuration error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		products, err := client.SearchProducts(query, first)
+		if err != nil {
+			http.Error(w, "Search failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		result := make([]ShopProduct, 0, len(products))
+		for _, p := range products {
+			result = append(result, transformProduct(p))
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
 	}
 }
 

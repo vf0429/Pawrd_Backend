@@ -2,6 +2,7 @@ package shopify
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -52,6 +53,34 @@ func (m *MockClient) FetchProducts(first int, after string) ([]Product, bool, st
 	}
 
 	return products, hasMore, nextCursor, nil
+}
+
+// SearchProducts returns mock products matching the query (title, description, tags, productType, vendor)
+func (m *MockClient) SearchProducts(query string, first int) ([]Product, error) {
+	if first <= 0 {
+		first = 20
+	}
+	q := strings.ToLower(query)
+	var results []Product
+	for _, p := range m.products {
+		if strings.Contains(strings.ToLower(p.Title), q) ||
+			strings.Contains(strings.ToLower(p.Description), q) ||
+			strings.Contains(strings.ToLower(p.ProductType), q) ||
+			strings.Contains(strings.ToLower(p.Vendor), q) {
+			results = append(results, p)
+		} else {
+			for _, tag := range p.Tags {
+				if strings.Contains(strings.ToLower(tag), q) {
+					results = append(results, p)
+					break
+				}
+			}
+		}
+		if len(results) >= first {
+			break
+		}
+	}
+	return results, nil
 }
 
 // FetchProductByHandle returns a single mock product by handle
