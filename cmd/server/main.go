@@ -105,6 +105,14 @@ func main() {
 	// Blog handlers
 	mux.HandleFunc("/api/posts", handlers.NewBlogHandler(db))
 
+	// Medical services handlers (public + admin)
+	mux.HandleFunc("/api/medical/services", handlers.NewMedicalServicesHandler(db))
+	mux.HandleFunc("/api/medical/services/{category}", handlers.NewMedicalServiceDetailHandler(db))
+	mux.HandleFunc("/api/medical/admin/services/{id}", handlers.NewMedicalAdminUpdateHandler(db))
+
+	// Seed medical demo content on startup (idempotent)
+	SeedMedicalServices(db)
+
 	// Mount Gin engine onto standard mux
 	// We handle both /api/v1 and /api/v1/ to be safe
 	v1Handler := http.StripPrefix("/api/v1", insuranceV1Router)
