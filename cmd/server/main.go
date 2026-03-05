@@ -86,6 +86,9 @@ func main() {
 	placesClient := places.NewClient(cfg.MapsAPIKey)
 	mux.HandleFunc("/api/vets", handlers.NewVetsHandler(placesClient))
 
+	// Shop handlers
+	mux.HandleFunc("/api/shop/products", handlers.NewShopHandler(cfg))
+
 	// Mount Gin engine onto standard mux
 	// We handle both /api/v1 and /api/v1/ to be safe
 	v1Handler := http.StripPrefix("/api/v1", insuranceV1Router)
