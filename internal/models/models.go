@@ -36,6 +36,7 @@ type BlogPost struct {
 	ImageColor   string    `json:"imageColor"`
 	Likes        int       `json:"likes"`
 	Timestamp    time.Time `json:"timestamp"`
+	ImageUrls    []string  `json:"imageUrls,omitempty"` // attached image URLs
 }
 
 type Clinic struct {

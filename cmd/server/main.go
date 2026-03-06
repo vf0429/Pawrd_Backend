@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/vf0429/Petwell_Backend/internal/config"
@@ -52,13 +53,23 @@ func main() {
 	// Create a new mux
 	mux := http.NewServeMux()
 
+	// Media upload + static file serving
+	uploadsDir := "assets/uploads"
+	_ = os.MkdirAll(uploadsDir, 0755)
+	mux.HandleFunc("/media/upload", handlers.NewMediaUploadHandler("http://localhost:8000"))
+	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(uploadsDir))))
+
 	// Core handlers
 	mux.HandleFunc("/vaccines", handlers.VaccinesHandler)
 	mux.HandleFunc("/register", handlers.RegisterHandler)
-	mux.HandleFunc("/posts", handlers.PostsHandler)
+	mux.HandleFunc("/posts", handlers.NewPostsHandler(db))
 
-	// Auth endpoint
+	// Seed test accounts on every startup (idempotent — skips existing)
+	SeedTestAccounts()
+
+	// Auth endpoints
 	mux.HandleFunc("/api/auth/login", handlers.NewAuthLoginHandler())
+	mux.HandleFunc("/api/auth/register", handlers.NewAuthRegisterHandler())
 	mux.HandleFunc("/clinics", handlers.NewClinicsHandler(cfg))
 	mux.HandleFunc("/emergency-clinics", handlers.NewEmergencyClinicsHandler(cfg))
 
@@ -85,6 +96,22 @@ func main() {
 	// Vets handler
 	placesClient := places.NewClient(cfg.MapsAPIKey)
 	mux.HandleFunc("/api/vets", handlers.NewVetsHandler(placesClient))
+
+	// Shop handlers
+	mux.HandleFunc("/api/shop/products", handlers.NewShopHandler(cfg))
+	mux.HandleFunc("/api/shop/products/{handle}", handlers.NewShopProductDetailHandler(cfg))
+	mux.HandleFunc("/api/shop/search", handlers.NewShopSearchHandler(cfg))
+
+	// Blog handlers
+	mux.HandleFunc("/api/posts", handlers.NewBlogHandler(db))
+
+	// Medical services handlers (public + admin)
+	mux.HandleFunc("/api/medical/services", handlers.NewMedicalServicesHandler(db))
+	mux.HandleFunc("/api/medical/services/{category}", handlers.NewMedicalServiceDetailHandler(db))
+	mux.HandleFunc("/api/medical/admin/services/{id}", handlers.NewMedicalAdminUpdateHandler(db))
+
+	// Seed medical demo content on startup (idempotent)
+	SeedMedicalServices(db)
 
 	// Mount Gin engine onto standard mux
 	// We handle both /api/v1 and /api/v1/ to be safe

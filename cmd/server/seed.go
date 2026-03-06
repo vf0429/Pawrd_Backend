@@ -3,9 +3,49 @@ package main
 import (
 	"log"
 
+	"github.com/google/uuid"
 	"github.com/vf0429/Petwell_Backend/internal/models"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
+
+// SeedTestAccounts creates the three dev test accounts in users.db.
+// Safe to call on every startup — skips accounts that already exist.
+func SeedTestAccounts() {
+	type account struct {
+		name  string
+		email string
+		pw    string
+	}
+	accounts := []account{
+		{"Vince", "vince@petwell.com", "Test123!"},
+		{"Alice", "alice@petwell.com", "Test123!"},
+		{"Bob", "bob@petwell.com", "Test123!"},
+	}
+
+	for _, a := range accounts {
+		var existing models.AuthUser
+		if err := models.AuthDB.Where("email = ?", a.email).First(&existing).Error; err == nil {
+			continue // already exists
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(a.pw), bcrypt.DefaultCost)
+		if err != nil {
+			log.Printf("Failed to hash password for %s: %v", a.email, err)
+			continue
+		}
+		user := models.AuthUser{
+			Email:        a.email,
+			Phone:        "phone-not-set-" + uuid.New().String(),
+			PasswordHash: string(hash),
+			Name:         a.name,
+		}
+		if err := models.AuthDB.Create(&user).Error; err != nil {
+			log.Printf("Failed to seed account %s: %v", a.email, err)
+			continue
+		}
+		log.Printf("Seeded test account: %s (%s)", a.name, a.email)
+	}
+}
 
 func SeedDatabase(db *gorm.DB) {
 	log.Println("Starting database seed...")
