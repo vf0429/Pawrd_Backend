@@ -95,6 +95,34 @@ func TestPetHealthOrderAscDesc(t *testing.T) {
 	if err := db.Create(&r2).Error; err != nil {
 		t.Fatal(err)
 	}
+	vOld := 88.5
+	vNew := 100.0
+	oldObs := models.ReportObservation{
+		ReportID:       r1.ID,
+		MetricKeyRaw:   "alt",
+		ValueNumber:    &vOld,
+		Unit:           "U/L",
+		ReviewStatus:   string(models.ReviewStatusAutoPass),
+		IsVerified:     true,
+		Confidence:     0.9,
+		ConsensusScore: 1,
+	}
+	newObs := models.ReportObservation{
+		ReportID:       r2.ID,
+		MetricKeyRaw:   "alt",
+		ValueNumber:    &vNew,
+		Unit:           "U/L",
+		ReviewStatus:   string(models.ReviewStatusAutoPass),
+		IsVerified:     true,
+		Confidence:     0.9,
+		ConsensusScore: 1,
+	}
+	if err := db.Create(&oldObs).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&newObs).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	h := NewPetHealthProfileHandler(db)
 
@@ -107,7 +135,8 @@ func TestPetHealthOrderAscDesc(t *testing.T) {
 		t.Fatalf("desc expected 200, got %d", wDesc.Code)
 	}
 	var respDesc struct {
-		Reports []models.HealthReport `json:"reports"`
+		Reports        []models.HealthReport               `json:"reports"`
+		LatestByMetric map[string]models.ReportObservation `json:"latest_by_metric"`
 	}
 	if err := json.Unmarshal(wDesc.Body.Bytes(), &respDesc); err != nil {
 		t.Fatal(err)
@@ -118,6 +147,9 @@ func TestPetHealthOrderAscDesc(t *testing.T) {
 	if !respDesc.Reports[0].ReportDate.After(respDesc.Reports[1].ReportDate) {
 		t.Fatalf("desc order mismatch")
 	}
+	if got := *respDesc.LatestByMetric["alt"].ValueNumber; got != 100 {
+		t.Fatalf("latest_by_metric should be newest value 100, got %v", got)
+	}
 
 	reqAsc := httptest.NewRequest(http.MethodGet, "/api/profile/pets/pet_abc/health?order=asc", nil)
 	reqAsc.SetPathValue("petId", "pet_abc")
@@ -127,12 +159,16 @@ func TestPetHealthOrderAscDesc(t *testing.T) {
 		t.Fatalf("asc expected 200, got %d", wAsc.Code)
 	}
 	var respAsc struct {
-		Reports []models.HealthReport `json:"reports"`
+		Reports        []models.HealthReport               `json:"reports"`
+		LatestByMetric map[string]models.ReportObservation `json:"latest_by_metric"`
 	}
 	if err := json.Unmarshal(wAsc.Body.Bytes(), &respAsc); err != nil {
 		t.Fatal(err)
 	}
 	if !respAsc.Reports[0].ReportDate.Before(respAsc.Reports[1].ReportDate) {
 		t.Fatalf("asc order mismatch")
+	}
+	if got := *respAsc.LatestByMetric["alt"].ValueNumber; got != 100 {
+		t.Fatalf("latest_by_metric should stay newest value 100, got %v", got)
 	}
 }

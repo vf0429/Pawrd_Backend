@@ -216,10 +216,10 @@ func NewPetHealthProfileHandler(db *gorm.DB) http.HandlerFunc {
 			return
 		}
 		reportOrder := "report_date DESC, created_at DESC"
-		observationOrder := "report_observations.created_at DESC"
+		observationOrder := "health_reports.report_date DESC, report_observations.created_at DESC"
 		if order == "asc" {
 			reportOrder = "report_date ASC, created_at ASC"
-			observationOrder = "report_observations.created_at ASC"
+			observationOrder = "health_reports.report_date ASC, report_observations.created_at ASC"
 		}
 
 		var reports []models.HealthReport
@@ -239,8 +239,18 @@ func NewPetHealthProfileHandler(db *gorm.DB) http.HandlerFunc {
 			return
 		}
 
+		// "latest_by_metric" must always be the newest by report_date, independent of list order.
+		var latestCandidates []models.ReportObservation
+		if err := db.Joins("JOIN health_reports ON health_reports.id = report_observations.report_id").
+			Where("health_reports.pet_id = ? AND report_observations.is_verified = ?", petID, true).
+			Order("health_reports.report_date DESC, report_observations.created_at DESC").
+			Find(&latestCandidates).Error; err != nil {
+			http.Error(w, "failed to load latest observations: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
 		latestByMetric := map[string]models.ReportObservation{}
-		for _, obs := range observations {
+		for _, obs := range latestCandidates {
 			key := strings.ToLower(strings.TrimSpace(obs.MetricKeyRaw))
 			if key == "" {
 				continue
