@@ -42,8 +42,10 @@ func NewInsuranceV1Handler(db *gorm.DB) *gin.Engine {
 				return
 			}
 
-			var response struct {
+			response := struct {
 				Scenarios []ScenarioResponse `json:"scenarios"`
+			}{
+				Scenarios: []ScenarioResponse{}, // always return [] not null
 			}
 
 			for _, s := range scenarios {
