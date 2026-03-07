@@ -112,6 +112,12 @@ func main() {
 	mux.HandleFunc("/api/medical/services/{category}", handlers.NewMedicalServiceDetailHandler(db))
 	mux.HandleFunc("/api/medical/admin/services/{id}", handlers.NewMedicalAdminUpdateHandler(db))
 
+	// Health report extraction + fusion handlers (profile backend pipeline)
+	mux.HandleFunc("/api/profile/health-reports", handlers.NewHealthReportCreateHandler(db))
+	mux.HandleFunc("/api/profile/health-reports/{id}", handlers.NewHealthReportDetailHandler(db))
+	mux.HandleFunc("/api/profile/health-reports/observations/{observationId}/review", handlers.NewObservationReviewHandler(db))
+	mux.HandleFunc("/api/profile/pets/{petId}/health", handlers.NewPetHealthProfileHandler(db))
+
 	// Partner application handlers
 	mux.HandleFunc("/api/partners/apply", handlers.NewPartnersApplyHandler(db))
 	mux.HandleFunc("/api/admin/partners", handlers.NewPartnersAdminListHandler(db))
