@@ -98,11 +98,10 @@ func Fuse(results []VendorResult, settings []VendorSetting) []FusedField {
 		}
 
 		consensus := consensus(items)
-		status := decideStatus(consensus)
+		vendors := uniqueSortedVendors(items)
+		status := decideStatus(consensus, len(vendors))
 		picked := pickValue(items)
 		confidence := averageWeight(items)
-
-		vendors := uniqueSortedVendors(items)
 		out = append(out, FusedField{
 			MetricKey:           key,
 			ValueNumber:         picked.ValueNumber,
@@ -123,7 +122,10 @@ func Fuse(results []VendorResult, settings []VendorSetting) []FusedField {
 	return out
 }
 
-func decideStatus(consensus float64) ReviewStatus {
+func decideStatus(consensus float64, vendorCount int) ReviewStatus {
+	if vendorCount < 2 {
+		return ManualConfirmRequired
+	}
 	switch {
 	case consensus >= 0.85:
 		return AutoPass

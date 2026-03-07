@@ -52,3 +52,19 @@ func TestFuse_SevereConflict_ManualConfirm(t *testing.T) {
 		t.Fatalf("expected manual confirm required, got %s", out[0].ReviewStatus)
 	}
 }
+
+func TestFuse_SingleVendor_AlwaysManualConfirm(t *testing.T) {
+	results := []VendorResult{
+		{VendorID: "only_one", Fields: []Field{{MetricKey: "ALT", ValueNumber: floatPtr(88), Confidence: 1}}},
+	}
+	out := Fuse(results, nil)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 fused field, got %d", len(out))
+	}
+	if out[0].ConsensusScore != 0.5 {
+		t.Fatalf("expected consensus 0.5 for single vendor, got %v", out[0].ConsensusScore)
+	}
+	if out[0].ReviewStatus != ManualConfirmRequired {
+		t.Fatalf("expected manual confirm required for single vendor, got %s", out[0].ReviewStatus)
+	}
+}
