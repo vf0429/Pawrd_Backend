@@ -100,7 +100,9 @@ func main() {
 	// Shop handlers
 	mux.HandleFunc("/api/shop/products", handlers.NewShopHandler(cfg))
 	mux.HandleFunc("/api/shop/products/{handle}", handlers.NewShopProductDetailHandler(cfg))
+	mux.HandleFunc("/api/shop/categories", handlers.NewShopCategoriesHandler(cfg))
 	mux.HandleFunc("/api/shop/search", handlers.NewShopSearchHandler(cfg))
+	mux.HandleFunc("/api/shop/checkout/payment-sheet", handlers.NewShopPaymentSheetHandler(cfg))
 
 	// Blog handlers
 	mux.HandleFunc("/api/posts", handlers.NewBlogHandler(db))

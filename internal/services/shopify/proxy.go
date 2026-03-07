@@ -58,8 +58,21 @@ func (c *Client) FetchProducts(first int, after string) ([]Product, bool, string
 						description
 						handle
 						productType
+						category {
+							id
+							name
+						}
 						vendor
 						tags
+						collections(first: 10) {
+							edges {
+								node {
+									id
+									title
+									handle
+								}
+							}
+						}
 						createdAt
 						updatedAt
 						priceRange {
@@ -168,8 +181,10 @@ func (c *Client) SearchProducts(query string, first int) ([]Product, error) {
 		query SearchProducts($first: Int!, $query: String!) {
 			products(first: $first, query: $query) {
 				edges {
-					node {
-						id title description handle productType vendor tags createdAt updatedAt
+						node {
+							id title description handle productType category { id name } vendor tags
+							collections(first: 10) { edges { node { id title handle } } }
+							createdAt updatedAt
 						priceRange {
 							minVariantPrice { amount currencyCode }
 							maxVariantPrice { amount currencyCode }
@@ -223,8 +238,26 @@ func (c *Client) FetchProductByHandle(handle string) (*Product, error) {
 				description
 				handle
 				productType
+				category {
+					id
+					name
+				}
 				vendor
 				tags
+				collections(first: 10) {
+					edges {
+						node {
+							id
+							title
+							handle
+						}
+					}
+				}
+				options {
+					id
+					name
+					values
+				}
 				createdAt
 				updatedAt
 				priceRange {
@@ -258,6 +291,10 @@ func (c *Client) FetchProductByHandle(handle string) (*Product, error) {
 								amount
 								currencyCode
 							}
+								compareAtPrice {
+									amount
+									currencyCode
+								}
 							image {
 								id
 								url
@@ -265,6 +302,10 @@ func (c *Client) FetchProductByHandle(handle string) (*Product, error) {
 								width
 								height
 							}
+								selectedOptions {
+									name
+									value
+								}
 							availableForSale
 						}
 					}
@@ -363,16 +404,23 @@ func (c *Client) executeGraphQL(payload map[string]interface{}) (json.RawMessage
 
 // rawProduct is the internal representation matching Shopify's response structure
 type rawProduct struct {
-	ID          string    `json:"id"`
-	Title       string    `json:"title"`
-	Description string    `json:"description"`
-	Handle      string    `json:"handle"`
-	ProductType string    `json:"productType"`
-	Vendor      string    `json:"vendor"`
-	Tags        []string  `json:"tags"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
-	PriceRange  struct {
+	ID          string            `json:"id"`
+	Title       string            `json:"title"`
+	Description string            `json:"description"`
+	Handle      string            `json:"handle"`
+	ProductType string            `json:"productType"`
+	Category    *TaxonomyCategory `json:"category"`
+	Vendor      string            `json:"vendor"`
+	Tags        []string          `json:"tags"`
+	Collections struct {
+		Edges []struct {
+			Node Collection `json:"node"`
+		} `json:"edges"`
+	} `json:"collections"`
+	Options    []ProductOption `json:"options"`
+	CreatedAt  time.Time       `json:"createdAt"`
+	UpdatedAt  time.Time       `json:"updatedAt"`
+	PriceRange struct {
 		MinVariantPrice Money `json:"minVariantPrice"`
 		MaxVariantPrice Money `json:"maxVariantPrice"`
 	} `json:"priceRange"`
@@ -389,12 +437,14 @@ type rawProduct struct {
 }
 
 type rawVariant struct {
-	ID               string `json:"id"`
-	Title            string `json:"title"`
-	SKU              string `json:"sku"`
-	Price            Money  `json:"price"`
-	Image            *Image `json:"image"`
-	AvailableForSale bool   `json:"availableForSale"`
+	ID               string           `json:"id"`
+	Title            string           `json:"title"`
+	SKU              string           `json:"sku"`
+	Price            Money            `json:"price"`
+	CompareAtPrice   *Money           `json:"compareAtPrice"`
+	Image            *Image           `json:"image"`
+	SelectedOptions  []SelectedOption `json:"selectedOptions"`
+	AvailableForSale bool             `json:"availableForSale"`
 }
 
 func (rp *rawProduct) toProduct() Product {
@@ -410,9 +460,16 @@ func (rp *rawProduct) toProduct() Product {
 			Title:            edge.Node.Title,
 			SKU:              edge.Node.SKU,
 			Price:            edge.Node.Price,
+			CompareAtPrice:   edge.Node.CompareAtPrice,
 			Image:            edge.Node.Image,
+			SelectedOptions:  edge.Node.SelectedOptions,
 			AvailableForSale: edge.Node.AvailableForSale,
 		})
+	}
+
+	collections := make([]Collection, 0, len(rp.Collections.Edges))
+	for _, edge := range rp.Collections.Edges {
+		collections = append(collections, edge.Node)
 	}
 
 	return Product{
@@ -421,8 +478,10 @@ func (rp *rawProduct) toProduct() Product {
 		Description: rp.Description,
 		Handle:      rp.Handle,
 		ProductType: rp.ProductType,
+		Category:    rp.Category,
 		Vendor:      rp.Vendor,
 		Tags:        rp.Tags,
+		Collections: collections,
 		CreatedAt:   rp.CreatedAt,
 		UpdatedAt:   rp.UpdatedAt,
 		PriceRange: PriceRange{
@@ -430,6 +489,7 @@ func (rp *rawProduct) toProduct() Product {
 			MaxVariantPrice: rp.PriceRange.MaxVariantPrice,
 		},
 		Images:   images,
+		Options:  rp.Options,
 		Variants: variants,
 	}
 }

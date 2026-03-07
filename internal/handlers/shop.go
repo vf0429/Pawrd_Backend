@@ -3,7 +3,9 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/vf0429/Petwell_Backend/internal/config"
 	"github.com/vf0429/Petwell_Backend/internal/services/shopify"
@@ -11,17 +13,18 @@ import (
 
 // ShopProduct represents the simplified product format for iOS
 type ShopProduct struct {
-	ID            string `json:"id"`
-	Title         string `json:"title"`
-	Description   string `json:"description"`
-	Price         string `json:"price"`
-	CurrencyCode  string `json:"currencyCode"`
-	ImageURL      string `json:"imageUrl"`
-	ProductType   string `json:"productType"`
-	Vendor        string `json:"vendor"`
-	Handle        string `json:"handle"`
-	VariantID     string `json:"variantId"`
-	Available     bool   `json:"available"`
+	ID           string   `json:"id"`
+	Title        string   `json:"title"`
+	Description  string   `json:"description"`
+	Price        string   `json:"price"`
+	CurrencyCode string   `json:"currencyCode"`
+	ImageURL     string   `json:"imageUrl"`
+	ProductType  string   `json:"productType"`
+	Categories   []string `json:"categories,omitempty"`
+	Vendor       string   `json:"vendor"`
+	Handle       string   `json:"handle"`
+	VariantID    string   `json:"variantId"`
+	Available    bool     `json:"available"`
 }
 
 // ProductsResponse is the response structure for product list
@@ -38,6 +41,14 @@ type ShopifyClient interface {
 	SearchProducts(query string, first int) ([]shopify.Product, error)
 }
 
+func newShopifyClient(cfg *config.Config) (ShopifyClient, error) {
+	if cfg.UseMockShopify {
+		return shopify.NewMockClient(), nil
+	}
+
+	return shopify.NewClient(cfg)
+}
+
 // NewShopHandler creates a handler for shop endpoints
 func NewShopHandler(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -50,18 +61,10 @@ func NewShopHandler(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		// Initialize Shopify client (real or mock)
-		var client ShopifyClient
-		var err error
-
-		if cfg.UseMockShopify {
-			client = shopify.NewMockClient()
-		} else {
-			client, err = shopify.NewClient(cfg)
-			if err != nil {
-				http.Error(w, "Shopify configuration error: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
+		client, err := newShopifyClient(cfg)
+		if err != nil {
+			http.Error(w, "Shopify configuration error: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 
 		// Parse query parameters
@@ -116,18 +119,10 @@ func NewShopProductDetailHandler(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		// Initialize Shopify client (real or mock)
-		var client ShopifyClient
-		var err error
-
-		if cfg.UseMockShopify {
-			client = shopify.NewMockClient()
-		} else {
-			client, err = shopify.NewClient(cfg)
-			if err != nil {
-				http.Error(w, "Shopify configuration error: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
+		client, err := newShopifyClient(cfg)
+		if err != nil {
+			http.Error(w, "Shopify configuration error: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 
 		// Fetch product by handle
@@ -141,9 +136,9 @@ func NewShopProductDetailHandler(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		// Return response
+		// Return the full product detail payload for the iOS detail page.
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(transformProduct(*product))
+		json.NewEncoder(w).Encode(product)
 	}
 }
 
@@ -173,16 +168,10 @@ func NewShopSearchHandler(cfg *config.Config) http.HandlerFunc {
 			}
 		}
 
-		var client ShopifyClient
-		var err error
-		if cfg.UseMockShopify {
-			client = shopify.NewMockClient()
-		} else {
-			client, err = shopify.NewClient(cfg)
-			if err != nil {
-				http.Error(w, "Shopify configuration error: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
+		client, err := newShopifyClient(cfg)
+		if err != nil {
+			http.Error(w, "Shopify configuration error: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 
 		products, err := client.SearchProducts(query, first)
@@ -201,17 +190,82 @@ func NewShopSearchHandler(cfg *config.Config) http.HandlerFunc {
 	}
 }
 
+// NewShopCategoriesHandler handles GET /api/shop/categories
+// Returns distinct Shopify product types across the catalog for app-side filtering.
+func NewShopCategoriesHandler(cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		EnableCors(&w)
+		if r.Method == http.MethodOptions {
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		client, err := newShopifyClient(cfg)
+		if err != nil {
+			http.Error(w, "Shopify configuration error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		categories, err := fetchAllShopCategories(client)
+		if err != nil {
+			http.Error(w, "Failed to fetch categories: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(categories)
+	}
+}
+
+func fetchAllShopCategories(client ShopifyClient) ([]string, error) {
+	const pageSize = 100
+
+	categorySet := make(map[string]struct{})
+	after := ""
+
+	for {
+		products, hasMore, nextCursor, err := client.FetchProducts(pageSize, after)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, product := range products {
+			for _, category := range categoriesFromProduct(product) {
+				categorySet[category] = struct{}{}
+			}
+		}
+
+		if !hasMore || nextCursor == "" {
+			break
+		}
+
+		after = nextCursor
+	}
+
+	categories := make([]string, 0, len(categorySet))
+	for category := range categorySet {
+		categories = append(categories, category)
+	}
+	sort.Strings(categories)
+
+	return categories, nil
+}
+
 // transformProduct converts a shopify.Product to ShopProduct for iOS
 func transformProduct(p shopify.Product) ShopProduct {
 	sp := ShopProduct{
-		ID:          p.ID,
-		Title:       p.Title,
-		Description: p.Description,
-		Price:       p.PriceRange.MinVariantPrice.Amount,
+		ID:           p.ID,
+		Title:        p.Title,
+		Description:  p.Description,
+		Price:        p.PriceRange.MinVariantPrice.Amount,
 		CurrencyCode: p.PriceRange.MinVariantPrice.CurrencyCode,
-		ProductType: p.ProductType,
-		Vendor:      p.Vendor,
-		Handle:      p.Handle,
+		ProductType:  p.ProductType,
+		Categories:   categoriesFromProduct(p),
+		Vendor:       p.Vendor,
+		Handle:       p.Handle,
 	}
 
 	// Get first image URL if available
@@ -229,4 +283,37 @@ func transformProduct(p shopify.Product) ShopProduct {
 	}
 
 	return sp
+}
+
+func categoriesFromProduct(p shopify.Product) []string {
+	categorySet := make(map[string]struct{})
+
+	if p.Category != nil {
+		name := strings.TrimSpace(p.Category.Name)
+		if name != "" {
+			categorySet[name] = struct{}{}
+		}
+	}
+
+	for _, collection := range p.Collections {
+		title := strings.TrimSpace(collection.Title)
+		if title == "" {
+			continue
+		}
+		categorySet[title] = struct{}{}
+	}
+
+	if len(categorySet) == 0 {
+		if productType := strings.TrimSpace(p.ProductType); productType != "" {
+			categorySet[productType] = struct{}{}
+		}
+	}
+
+	categories := make([]string, 0, len(categorySet))
+	for category := range categorySet {
+		categories = append(categories, category)
+	}
+	sort.Strings(categories)
+
+	return categories
 }

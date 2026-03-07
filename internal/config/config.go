@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -18,6 +19,8 @@ type Config struct {
 	ShopifyDomain          string
 	ShopifyStorefrontToken string
 	UseMockShopify         bool
+	StripeSecretKey        string
+	StripePublishableKey   string
 }
 
 func LoadConfig() *Config {
@@ -38,9 +41,11 @@ func LoadConfig() *Config {
 		DBUser:                 getEnvOrDefault("DB_USER", "postgres"),
 		DBPassword:             getEnvOrDefault("DB_PASSWORD", "postgres"),
 		DBName:                 getEnvOrDefault("DB_NAME", "petwell"),
-		ShopifyDomain:          os.Getenv("SHOPIFY_DOMAIN"),
-		ShopifyStorefrontToken: os.Getenv("SHOPIFY_STOREFRONT_TOKEN"),
+		ShopifyDomain:          strings.TrimSpace(os.Getenv("SHOPIFY_DOMAIN")),
+		ShopifyStorefrontToken: strings.TrimSpace(os.Getenv("SHOPIFY_STOREFRONT_TOKEN")),
 		UseMockShopify:         os.Getenv("USE_MOCK_SHOPIFY") == "true",
+		StripeSecretKey:        strings.TrimSpace(os.Getenv("STRIPE_SECRET_KEY")),
+		StripePublishableKey:   strings.TrimSpace(os.Getenv("STRIPE_PUBLISHABLE_KEY")),
 	}
 }
 
@@ -51,6 +56,17 @@ func (c *Config) ValidateShopifyConfig() error {
 	}
 	if c.ShopifyStorefrontToken == "" {
 		return fmt.Errorf("SHOPIFY_STOREFRONT_TOKEN environment variable is required")
+	}
+	return nil
+}
+
+// ValidateStripeConfig checks if Stripe configuration is properly set.
+func (c *Config) ValidateStripeConfig() error {
+	if c.StripeSecretKey == "" {
+		return fmt.Errorf("STRIPE_SECRET_KEY environment variable is required")
+	}
+	if c.StripePublishableKey == "" {
+		return fmt.Errorf("STRIPE_PUBLISHABLE_KEY environment variable is required")
 	}
 	return nil
 }

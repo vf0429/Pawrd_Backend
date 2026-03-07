@@ -8,6 +8,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
 	github.com/mattn/go-sqlite3 v1.14.34
+	github.com/stripe/stripe-go/v82 v82.5.1
 	golang.org/x/crypto v0.48.0
 	googlemaps.github.io/maps v1.7.0
 	gorm.io/driver/sqlite v1.6.0
