@@ -191,8 +191,7 @@ func buildVendorPayload(vendor VendorDefinition, req ExtractRequest) map[string]
 					"content": contents,
 				},
 			},
-			"temperature":     0,
-			"response_format": map[string]interface{}{"type": "json_object"},
+			"temperature": 0,
 		}
 	}
 
