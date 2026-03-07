@@ -21,6 +21,7 @@ type healthReportCreateRequest struct {
 	ReportType        string                      `json:"report_type"`
 	ClinicName        string                      `json:"clinic_name"`
 	ReportDate        string                      `json:"report_date"`
+	ExtractionMode    string                      `json:"extraction_mode,omitempty"` // markdown | json
 	ImageURLs         []string                    `json:"image_urls,omitempty"`
 	ImageObjectKeys   []string                    `json:"image_object_keys,omitempty"`
 	ImageBase64       []string                    `json:"image_base64,omitempty"`
@@ -68,6 +69,8 @@ func NewHealthReportCreateHandler(db *gorm.DB) http.HandlerFunc {
 			reportDate = parsed
 		}
 
+		mode := normalizeExtractionMode(req.ExtractionMode)
+
 		if len(req.ImageObjectKeys) > 0 {
 			store, err := objectstore.NewCOSStoreFromEnv()
 			if err != nil {
@@ -90,16 +93,31 @@ func NewHealthReportCreateHandler(db *gorm.DB) http.HandlerFunc {
 
 		var (
 			vendorResults []reportfusion.VendorResult
+			vendorMD      []reportfusion.VendorMarkdownResult
 			err           error
 		)
 		if len(req.MockVendorResults) > 0 {
 			vendorResults = req.MockVendorResults
+			mode = "json"
+		} else if mode == "markdown" {
+			ctx, cancel := context.WithTimeout(r.Context(), extractionTimeout())
+			defer cancel()
+			vendorMD, err = vendorClient.ExtractMarkdownFromAll(ctx, reportfusion.ExtractRequest{
+				ImageURLs:      req.ImageURLs,
+				ImageBase64:    req.ImageBase64,
+				ExtractionMode: "markdown",
+			})
+			if err != nil {
+				http.Error(w, "failed to call extraction vendors: "+err.Error(), http.StatusBadGateway)
+				return
+			}
 		} else {
 			ctx, cancel := context.WithTimeout(r.Context(), extractionTimeout())
 			defer cancel()
 			vendorResults, err = vendorClient.ExtractFromAll(ctx, reportfusion.ExtractRequest{
-				ImageURLs:   req.ImageURLs,
-				ImageBase64: req.ImageBase64,
+				ImageURLs:      req.ImageURLs,
+				ImageBase64:    req.ImageBase64,
+				ExtractionMode: "json",
 			})
 			if err != nil {
 				http.Error(w, "failed to call extraction vendors: "+err.Error(), http.StatusBadGateway)
@@ -107,32 +125,45 @@ func NewHealthReportCreateHandler(db *gorm.DB) http.HandlerFunc {
 			}
 		}
 
-		fusedFields := reportfusion.Fuse(vendorResults, vendorClient.VendorSettings())
-		if len(fusedFields) == 0 {
-			http.Error(w, "no fields extracted from vendors", http.StatusBadGateway)
-			return
-		}
-
-		rawJSON, _ := json.Marshal(map[string]interface{}{
-			"vendor_results": vendorResults,
-			"fused_fields":   fusedFields,
-		})
-
 		report := models.HealthReport{
 			PetID:            req.PetID,
 			ReportType:       normalizeReportType(req.ReportType),
 			ClinicName:       strings.TrimSpace(req.ClinicName),
 			ReportDate:       reportDate,
 			SourceImageCount: maxInt(maxInt(len(req.ImageURLs), len(req.ImageBase64)), len(req.ImageObjectKeys)),
-			RawPayloadJSON:   string(rawJSON),
+			RawPayloadJSON:   "{}",
 			SchemaVersion:    "v1",
 			FusionVersion:    "v1",
 		}
-
-		observations, overallConfidence, overallConsensus, finalStatus := buildObservations(report.ID, fusedFields)
-		report.OverallConfidence = overallConfidence
-		report.ConsensusScore = overallConsensus
-		report.FinalReviewStatus = finalStatus
+		var (
+			observations    []models.ReportObservation
+			markdownContent string
+		)
+		if mode == "markdown" {
+			markdownContent = combineMarkdown(vendorMD)
+			rawJSON, _ := json.Marshal(map[string]interface{}{
+				"extraction_mode":  "markdown",
+				"markdown_content": markdownContent,
+				"vendor_markdowns": vendorMD,
+			})
+			report.RawPayloadJSON = string(rawJSON)
+			report.FinalReviewStatus = string(models.ReviewStatusPendingReview)
+			report.ConsensusScore = 0
+			report.OverallConfidence = 0
+		} else {
+			fusedFields := reportfusion.Fuse(vendorResults, vendorClient.VendorSettings())
+			if len(fusedFields) == 0 {
+				http.Error(w, "no fields extracted from vendors", http.StatusBadGateway)
+				return
+			}
+			rawJSON, _ := json.Marshal(map[string]interface{}{
+				"extraction_mode": "json",
+				"vendor_results":  vendorResults,
+				"fused_fields":    fusedFields,
+			})
+			report.RawPayloadJSON = string(rawJSON)
+			observations, report.OverallConfidence, report.ConsensusScore, report.FinalReviewStatus = buildObservations(report.ID, fusedFields)
+		}
 
 		err = db.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Create(&report).Error; err != nil {
@@ -148,17 +179,33 @@ func NewHealthReportCreateHandler(db *gorm.DB) http.HandlerFunc {
 				}
 			}
 
-			for _, vr := range vendorResults {
-				raw, _ := json.Marshal(vr)
-				ve := models.ReportVendorExtraction{
-					ReportID:        report.ID,
-					VendorID:        vr.VendorID,
-					Model:           vr.Model,
-					FieldCount:      len(vr.Fields),
-					RawResponseJSON: string(raw),
+			if mode == "markdown" {
+				for _, vm := range vendorMD {
+					raw, _ := json.Marshal(vm)
+					ve := models.ReportVendorExtraction{
+						ReportID:        report.ID,
+						VendorID:        vm.VendorID,
+						Model:           vm.Model,
+						FieldCount:      0,
+						RawResponseJSON: string(raw),
+					}
+					if err := tx.Create(&ve).Error; err != nil {
+						return err
+					}
 				}
-				if err := tx.Create(&ve).Error; err != nil {
-					return err
+			} else {
+				for _, vr := range vendorResults {
+					raw, _ := json.Marshal(vr)
+					ve := models.ReportVendorExtraction{
+						ReportID:        report.ID,
+						VendorID:        vr.VendorID,
+						Model:           vr.Model,
+						FieldCount:      len(vr.Fields),
+						RawResponseJSON: string(raw),
+					}
+					if err := tx.Create(&ve).Error; err != nil {
+						return err
+					}
 				}
 			}
 			return nil
@@ -174,9 +221,14 @@ func NewHealthReportCreateHandler(db *gorm.DB) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		resp := map[string]interface{}{
 			"report": report,
-		})
+		}
+		if mode == "markdown" {
+			resp["markdown_content"] = markdownContent
+			resp["extraction_mode"] = "markdown"
+		}
+		json.NewEncoder(w).Encode(resp)
 	}
 }
 
@@ -192,6 +244,27 @@ func extractionTimeout() time.Duration {
 		secs = 60
 	}
 	return time.Duration(secs) * time.Second
+}
+
+func normalizeExtractionMode(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "json":
+		return "json"
+	default:
+		return "markdown"
+	}
+}
+
+func combineMarkdown(results []reportfusion.VendorMarkdownResult) string {
+	parts := make([]string, 0, len(results))
+	for _, r := range results {
+		md := strings.TrimSpace(r.Markdown)
+		if md == "" {
+			continue
+		}
+		parts = append(parts, "## "+r.VendorID+" ("+r.Model+")\n\n"+md)
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n\n---\n\n"))
 }
 
 func NewHealthReportDetailHandler(db *gorm.DB) http.HandlerFunc {

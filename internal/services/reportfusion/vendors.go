@@ -28,8 +28,15 @@ type VendorDefinition struct {
 }
 
 type ExtractRequest struct {
-	ImageURLs   []string `json:"image_urls,omitempty"`
-	ImageBase64 []string `json:"image_base64,omitempty"`
+	ImageURLs       []string `json:"image_urls,omitempty"`
+	ImageBase64     []string `json:"image_base64,omitempty"`
+	ExtractionMode  string   `json:"extraction_mode,omitempty"` // json | markdown
+}
+
+type VendorMarkdownResult struct {
+	VendorID string `json:"vendor_id"`
+	Model    string `json:"model"`
+	Markdown string `json:"markdown"`
 }
 
 func NewVendorClient(timeout time.Duration) *VendorClient {
@@ -120,7 +127,76 @@ func (c *VendorClient) ExtractFromAll(ctx context.Context, req ExtractRequest) (
 	return results, nil
 }
 
+func (c *VendorClient) ExtractMarkdownFromAll(ctx context.Context, req ExtractRequest) ([]VendorMarkdownResult, error) {
+	active := c.ActiveVendors()
+	if len(active) == 0 {
+		return nil, errors.New("no active vendor endpoints configured")
+	}
+
+	req.ExtractionMode = "markdown"
+
+	type oneResult struct {
+		result VendorMarkdownResult
+		err    error
+	}
+	ch := make(chan oneResult, len(active))
+	for _, vendor := range active {
+		v := vendor
+		go func() {
+			markdown, err := c.extractMarkdownFromVendor(ctx, v, req)
+			if err != nil {
+				ch <- oneResult{err: fmt.Errorf("%s: %w", v.VendorID, err)}
+				return
+			}
+			ch <- oneResult{
+				result: VendorMarkdownResult{
+					VendorID: v.VendorID,
+					Model:    v.Model,
+					Markdown: markdown,
+				},
+			}
+		}()
+	}
+
+	var (
+		results []VendorMarkdownResult
+		errs    []string
+	)
+	for i := 0; i < len(active); i++ {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case r := <-ch:
+			if r.err != nil {
+				errs = append(errs, r.err.Error())
+				continue
+			}
+			results = append(results, r.result)
+		}
+	}
+	if len(results) == 0 {
+		return nil, fmt.Errorf("all vendor calls failed: %s", strings.Join(errs, "; "))
+	}
+	return results, nil
+}
+
 func (c *VendorClient) extractFromVendor(ctx context.Context, vendor VendorDefinition, req ExtractRequest) ([]Field, error) {
+	respBody, err := c.callVendor(ctx, vendor, req)
+	if err != nil {
+		return nil, err
+	}
+	return decodeVendorFields(vendor, respBody)
+}
+
+func (c *VendorClient) extractMarkdownFromVendor(ctx context.Context, vendor VendorDefinition, req ExtractRequest) (string, error) {
+	respBody, err := c.callVendor(ctx, vendor, req)
+	if err != nil {
+		return "", err
+	}
+	return decodeVendorMarkdown(vendor, respBody)
+}
+
+func (c *VendorClient) callVendor(ctx context.Context, vendor VendorDefinition, req ExtractRequest) ([]byte, error) {
 	payload := buildVendorPayload(vendor, req)
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -152,16 +228,24 @@ func (c *VendorClient) extractFromVendor(ctx context.Context, vendor VendorDefin
 		}
 		return nil, fmt.Errorf("status %d body=%s", resp.StatusCode, msg)
 	}
-	return decodeVendorFields(vendor, respBody)
+	return respBody, nil
 }
 
 func buildVendorPayload(vendor VendorDefinition, req ExtractRequest) map[string]interface{} {
 	// SiliconFlow is OpenAI-compatible. Build chat/completions payload with image input.
 	if strings.Contains(strings.ToLower(vendor.Endpoint), "siliconflow.cn") {
+		mode := strings.TrimSpace(strings.ToLower(req.ExtractionMode))
+		if mode == "" {
+			mode = "json"
+		}
+		prompt := "Extract pet health report fields and output pure JSON only: {\"fields\":[{\"metric_key\":\"string\",\"value_number\":number|null,\"value_text\":\"string\",\"unit\":\"string\",\"reference_range\":\"string\",\"qualitative_result\":\"阳性|阴性|可疑|未知\",\"confidence\":0~1}]}. Preserve original table semantics. If value is NoCt, put value_text=\"NoCt\"."
+		if mode == "markdown" {
+			prompt = "Please transcribe this pet health report into Markdown only. Keep table structure, metrics, values, units, reference ranges and positive/negative results. If unreadable, mark [unclear]. Output Markdown body only, no JSON and no extra explanation."
+		}
 		contents := []map[string]interface{}{
 			{
 				"type": "text",
-				"text": "Extract pet health report fields and output pure JSON only: {\"fields\":[{\"metric_key\":\"string\",\"value_number\":number|null,\"value_text\":\"string\",\"unit\":\"string\",\"reference_range\":\"string\",\"qualitative_result\":\"阳性|阴性|可疑|未知\",\"confidence\":0~1}]}. Preserve original table semantics. If value is NoCt, put value_text=\"NoCt\".",
+				"text": prompt,
 			},
 		}
 		for _, u := range req.ImageURLs {
@@ -207,6 +291,46 @@ func buildVendorPayload(vendor VendorDefinition, req ExtractRequest) map[string]
 		"image_urls":   req.ImageURLs,
 		"image_base64": req.ImageBase64,
 	}
+}
+
+func decodeVendorMarkdown(vendor VendorDefinition, body []byte) (string, error) {
+	var openAICompat struct {
+		Choices []struct {
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &openAICompat); err == nil && len(openAICompat.Choices) > 0 {
+		content := strings.TrimSpace(extractContentText(openAICompat.Choices[0].Message.Content))
+		if content != "" {
+			return content, nil
+		}
+	}
+
+	var direct struct {
+		Markdown string `json:"markdown"`
+		Content  string `json:"content"`
+		Text     string `json:"text"`
+	}
+	if err := json.Unmarshal(body, &direct); err == nil {
+		content := strings.TrimSpace(direct.Markdown)
+		if content == "" {
+			content = strings.TrimSpace(direct.Content)
+		}
+		if content == "" {
+			content = strings.TrimSpace(direct.Text)
+		}
+		if content != "" {
+			return content, nil
+		}
+	}
+
+	snippet := strings.TrimSpace(string(body))
+	if len(snippet) > 500 {
+		snippet = snippet[:500] + "..."
+	}
+	return "", fmt.Errorf("unable to decode markdown for vendor %s, body=%s", vendor.VendorID, snippet)
 }
 
 func loadVendorsFromEnv() []VendorDefinition {
