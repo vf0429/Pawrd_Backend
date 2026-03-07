@@ -135,14 +135,16 @@ func (c *VendorClient) extractFromVendor(ctx context.Context, vendor VendorDefin
 		return nil, err
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
-	}
-
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg := strings.TrimSpace(string(respBody))
+		if len(msg) > 400 {
+			msg = msg[:400] + "..."
+		}
+		return nil, fmt.Errorf("status %d body=%s", resp.StatusCode, msg)
 	}
 	return decodeVendorFields(vendor, respBody)
 }
