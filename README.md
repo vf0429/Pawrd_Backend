@@ -85,3 +85,4 @@ curl http://localhost:8000/emergency-clinics
 存储各保险计划的具体赔偿限额。
 - `limit_item`, `provider_key` (外键), `category`, `subcategory`, `level`
 - `coverage_amount_hkd` (港币限额), `notes` (备注)
+
