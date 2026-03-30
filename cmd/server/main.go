@@ -135,6 +135,14 @@ func main() {
 	// Seed medical demo content on startup (idempotent)
 	SeedMedicalServices(db)
 
+	// Auto-seed scenario data if the table is empty (idempotent)
+	var scenarioCount int64
+	db.Model(&models.Scenario{}).Count(&scenarioCount)
+	if scenarioCount == 0 {
+		log.Println("No scenarios found, running auto-seed...")
+		SeedDatabase(db)
+	}
+
 	// Mount Gin engine onto standard mux
 	// We handle both /api/v1 and /api/v1/ to be safe
 	v1Handler := http.StripPrefix("/api/v1", insuranceV1Router)
