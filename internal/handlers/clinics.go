@@ -145,8 +145,9 @@ func (s *ClinicsService) loadClinics(cfg *config.Config) {
 					cl := s.clinics[idx] // Copy the struct value
 					s.mu.RUnlock()
 
-					// Skip if already enriched
-					if cl.GooglePlaceID != "" && cl.Latitude != "" && cl.Longitude != "" && cl.PhotoReference != "" {
+					// photo_reference can expire. If place_id exists, we should still refresh details.
+					// Only skip when we already have local data but cannot refresh from Google (no place_id).
+					if cl.GooglePlaceID == "" && cl.Latitude != "" && cl.Longitude != "" && cl.PhotoReference != "" {
 						return
 					}
 
