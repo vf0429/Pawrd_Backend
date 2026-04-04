@@ -149,7 +149,7 @@ func main() {
 	mux.Handle("/api/v1", v1Handler)
 	mux.Handle("/api/v1/", v1Handler)
 
-	fmt.Printf("PetWell Backend running at http://localhost:%s\n", port)
+	fmt.Printf("Pawrd Backend running at http://localhost:%s\n", port)
 	fmt.Println("Chat endpoints:")
 	fmt.Println("  POST /api/chat/session          - Create session")
 	fmt.Println("  POST /api/chat/session/{id}/provider - Select provider")

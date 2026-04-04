@@ -1,6 +1,6 @@
-# PetWell 后端 (Go)
+# Pawrd 后端 (Go)
 
-PetWell iOS 应用的 Go 语言后端服务。
+Pawrd iOS 应用的 Go 语言后端服务。
 
 ## �️ 项目开发规范
 
@@ -70,7 +70,7 @@ curl http://localhost:8000/emergency-clinics
 | `vaccines.json`    | 疫苗信息                           |
 | `clinics.csv`      | 兽医诊所列表                       |
 | `insurance.db`     | SQLite 数据库 (包含保险数据)        |
-| `petwell.db`       | SQLite 数据库 (自动创建，用于其他数据)|
+| `pawrd.db`       | SQLite 数据库 (自动创建，用于其他数据)|
 
 ---
 

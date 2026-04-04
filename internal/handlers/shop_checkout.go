@@ -90,7 +90,7 @@ func NewShopPaymentSheetHandler(cfg *config.Config) http.HandlerFunc {
 			Description:   description,
 			ReceiptEmail:  customerEmail,
 			Metadata:      metadata,
-			StatementNote: "PETWELL",
+			StatementNote: "PAWRD",
 		})
 		if err != nil {
 			http.Error(w, "Failed to create payment intent: "+err.Error(), http.StatusInternalServerError)
@@ -101,7 +101,7 @@ func NewShopPaymentSheetHandler(cfg *config.Config) http.HandlerFunc {
 		json.NewEncoder(w).Encode(ShopPaymentSheetResponse{
 			PaymentIntentClientSecret: intent.ClientSecret,
 			PublishableKey:            intent.PublishableKey,
-			MerchantDisplayName:       "PetWell",
+			MerchantDisplayName:       "Pawrd",
 			Amount:                    amount,
 			Currency:                  strings.ToLower(currency),
 		})
@@ -162,9 +162,9 @@ func buildCheckoutPaymentData(client ShopifyClient, req ShopPaymentSheetRequest)
 	metadata["customer_phone"] = strings.TrimSpace(req.Customer.Phone)
 	metadata["total_items"] = strconv.Itoa(totalQuantity)
 
-	description := fmt.Sprintf("PetWell order (%d item(s))", totalQuantity)
+	description := fmt.Sprintf("Pawrd order (%d item(s))", totalQuantity)
 	if len(itemDescriptions) > 0 {
-		description = "PetWell: " + strings.Join(itemDescriptions, ", ")
+		description = "Pawrd: " + strings.Join(itemDescriptions, ", ")
 	}
 
 	return totalAmount, currency, description, metadata, nil

@@ -40,7 +40,7 @@ func LoadConfig() *Config {
 		DBPort:                 getEnvOrDefault("DB_PORT", "5432"),
 		DBUser:                 getEnvOrDefault("DB_USER", "postgres"),
 		DBPassword:             getEnvOrDefault("DB_PASSWORD", "postgres"),
-		DBName:                 getEnvOrDefault("DB_NAME", "petwell"),
+		DBName:                 getEnvOrDefault("DB_NAME", "pawrd"),
 		ShopifyDomain:          strings.TrimSpace(os.Getenv("SHOPIFY_DOMAIN")),
 		ShopifyStorefrontToken: strings.TrimSpace(os.Getenv("SHOPIFY_STOREFRONT_TOKEN")),
 		UseMockShopify:         os.Getenv("USE_MOCK_SHOPIFY") == "true",

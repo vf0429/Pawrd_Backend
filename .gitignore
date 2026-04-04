@@ -1,6 +1,6 @@
 # Binaries
-Petwell_Backend
-petwell_server
+Pawrd_Backend
+pawrd_server
 *.exe
 
 # Database files

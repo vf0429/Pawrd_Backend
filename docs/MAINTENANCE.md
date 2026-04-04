@@ -1,6 +1,6 @@
-# PetWell Backend Maintenance Guide
+# Pawrd Backend Maintenance Guide
 
-This backend serves the PetWell iOS application. It is built with Go and serves static JSON data.
+This backend serves the Pawrd iOS application. It is built with Go and serves static JSON data.
 
 ## Project Structure
 

@@ -1,6 +1,6 @@
 Enriching clinics with Google Maps data in background...
 Loaded 59 clinics from CSV
-PetWell Backend running at http://localhost:8000
+Pawrd Backend running at http://localhost:8000
 Enriched: Acorn Veterinary Hospital (Rating: 4.2)
 Enriched: CityU Veterinary Medical Centre (Rating: 3.7)
 Enriched: Animal Medical Centre (Rating: 3.5)

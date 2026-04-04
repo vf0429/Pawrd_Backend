@@ -28,9 +28,9 @@ func main() {
 		Password string
 		Name     string
 	}{
-		{"test1@petwell.com", "+85291111111", "password123", "Test User 1"},
-		{"test2@petwell.com", "+85292222222", "password123", "Test User 2"},
-		{"test3@petwell.com", "+85293333333", "password123", "Test User 3"},
+		{"test1@pawrd.com", "+85291111111", "password123", "Test User 1"},
+		{"test2@pawrd.com", "+85292222222", "password123", "Test User 2"},
+		{"test3@pawrd.com", "+85293333333", "password123", "Test User 3"},
 	}
 
 	for _, tu := range testUsers {
@@ -61,7 +61,7 @@ func main() {
 	fmt.Println("\n=== Seed Complete ===")
 	fmt.Println("Database: assets/users.db")
 	fmt.Println("Test accounts:")
-	fmt.Println("  test1@petwell.com / +85291111111 / password123")
-	fmt.Println("  test2@petwell.com / +85292222222 / password123")
-	fmt.Println("  test3@petwell.com / +85293333333 / password123")
+	fmt.Println("  test1@pawrd.com / +85291111111 / password123")
+	fmt.Println("  test2@pawrd.com / +85292222222 / password123")
+	fmt.Println("  test3@pawrd.com / +85293333333 / password123")
 }

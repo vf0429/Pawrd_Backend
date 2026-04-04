@@ -31,12 +31,12 @@ func SeedMedicalServices(db *gorm.DB) {
   "steps": [
     "Weigh your pet before purchasing — dose is weight-based.",
     "Administer with food to minimise stomach upset.",
-    "Record the date and product used in the PetWell Health Records.",
+    "Record the date and product used in the Pawrd Health Records.",
     "Repeat on schedule — set a reminder in the app."
   ],
   "notes": "Puppies and kittens should be dewormed from 2 weeks of age and more frequently in the first 6 months."
 }`,
-			Provider:  "PetWell Health",
+			Provider:  "Pawrd Health",
 			Contact:   "",
 			IsActive:  true,
 			SortOrder: 1,
@@ -65,7 +65,7 @@ func SeedMedicalServices(db *gorm.DB) {
   "signs_of_dental_disease": ["Bad breath", "Yellow/brown tartar on teeth", "Red or bleeding gums", "Difficulty chewing", "Pawing at mouth"],
   "frequency": "Professional cleaning every 1–2 years; home care daily."
 }`,
-			Provider:  "PetWell Health",
+			Provider:  "Pawrd Health",
 			Contact:   "",
 			IsActive:  true,
 			SortOrder: 2,
@@ -113,7 +113,7 @@ func SeedMedicalServices(db *gorm.DB) {
     "As part of a new-pet baseline health check"
   ]
 }`,
-			Provider:  "PetWell Health",
+			Provider:  "Pawrd Health",
 			Contact:   "",
 			IsActive:  true,
 			SortOrder: 3,
@@ -147,7 +147,7 @@ func SeedMedicalServices(db *gorm.DB) {
   ],
   "important": "Always update the registry if your contact details change — the chip is only useful if the registry is current."
 }`,
-			Provider:  "PetWell Health",
+			Provider:  "Pawrd Health",
 			Contact:   "",
 			IsActive:  true,
 			SortOrder: 4,
@@ -179,7 +179,7 @@ func SeedMedicalServices(db *gorm.DB) {
       "name": "Weight Management Programme",
       "format": "3-month programme",
       "price_hkd": 1800,
-      "includes": ["Monthly weigh-ins", "Progressive meal plan", "Progress tracking in PetWell app"]
+      "includes": ["Monthly weigh-ins", "Progressive meal plan", "Progress tracking in Pawrd app"]
     }
   ],
   "common_concerns": [
@@ -189,7 +189,7 @@ func SeedMedicalServices(db *gorm.DB) {
     {"issue": "Puppy/Kitten Growth", "tip": "Large-breed puppies need controlled calcium — not just 'more food'."}
   ]
 }`,
-			Provider:  "PetWell Health",
+			Provider:  "Pawrd Health",
 			Contact:   "",
 			IsActive:  true,
 			SortOrder: 5,
@@ -203,7 +203,7 @@ func SeedMedicalServices(db *gorm.DB) {
 			Description: "Pre-operative preparation, post-operative monitoring, and wound care guidance. Covers spay/neuter, orthopaedic, soft tissue, and emergency procedures.",
 			DescZh:      "術前準備、術後監護及傷口護理指引，涵蓋絕育、骨科、軟組織及緊急手術。",
 			ContentJSON: `{
-  "overview": "Surgical procedures require careful preparation and attentive aftercare. PetWell's surgery care guide walks you through every stage — from pre-op blood tests to wound healing milestones — so you know exactly what to expect.",
+  "overview": "Surgical procedures require careful preparation and attentive aftercare. Pawrd's surgery care guide walks you through every stage — from pre-op blood tests to wound healing milestones — so you know exactly what to expect.",
   "pre_op_checklist": [
     "Fasting: No food 8–12 hours before surgery (water is usually fine until 2–4 hours before).",
     "Pre-anaesthetic blood test recommended for all pets (mandatory for seniors).",
@@ -227,7 +227,7 @@ func SeedMedicalServices(db *gorm.DB) {
   ],
   "when_to_call_the_vet": ["Bleeding that does not stop", "Vomiting more than 3 times post-op", "Extreme lethargy beyond 24 hours", "Wound opens or shows pus", "Pet refuses to eat for more than 48 hours"]
 }`,
-			Provider:  "PetWell Health",
+			Provider:  "Pawrd Health",
 			Contact:   "",
 			IsActive:  true,
 			SortOrder: 6,

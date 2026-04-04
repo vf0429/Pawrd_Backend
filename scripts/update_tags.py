@@ -3,7 +3,7 @@ import os
 
 # Connect to the SQLite database
 # Using absolute path to ensure correct file is accessed
-db_path = '/Users/vfzzz/Downloads/Petwell_Backend_Repo/pet_insurance.db'
+db_path = '/Users/vfzzz/Downloads/Pawrd_Backend_Repo/pet_insurance.db'
 
 if not os.path.exists(db_path):
     print(f"Error: Database file not found at {db_path}")

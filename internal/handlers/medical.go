@@ -87,7 +87,7 @@ func NewMedicalAdminUpdateHandler(db *gorm.DB) http.HandlerFunc {
 		// Auth check
 		adminKey := os.Getenv("MEDICAL_ADMIN_KEY")
 		if adminKey == "" {
-			adminKey = "petwell-admin-dev" // fallback for local dev
+			adminKey = "pawrd-admin-dev" // fallback for local dev
 		}
 		if r.Header.Get("X-Admin-Key") != adminKey {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)

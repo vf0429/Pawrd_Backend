@@ -8,7 +8,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// Claims is the payload stored inside every PetWell JWT.
+// Claims is the payload stored inside every Pawrd JWT.
 type Claims struct {
 	UserID string `json:"user_id"`
 	Email  string `json:"email"`
@@ -21,7 +21,7 @@ type Claims struct {
 func secret() []byte {
 	s := os.Getenv("JWT_SECRET")
 	if s == "" {
-		s = "petwell-dev-secret-change-before-production"
+		s = "pawrd-dev-secret-change-before-production"
 	}
 	return []byte(s)
 }
@@ -36,7 +36,7 @@ func GenerateToken(userID, email, name string) (string, error) {
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(365 * 24 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			Issuer:    "petwell",
+			Issuer:    "pawrd",
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)

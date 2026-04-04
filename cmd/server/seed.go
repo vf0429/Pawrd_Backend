@@ -18,9 +18,9 @@ func SeedTestAccounts() {
 		pw    string
 	}
 	accounts := []account{
-		{"Vince", "vince@petwell.com", "Test123!"},
-		{"Alice", "alice@petwell.com", "Test123!"},
-		{"Bob", "bob@petwell.com", "Test123!"},
+		{"Vince", "vince@pawrd.com", "Test123!"},
+		{"Alice", "alice@pawrd.com", "Test123!"},
+		{"Bob", "bob@pawrd.com", "Test123!"},
 	}
 
 	for _, a := range accounts {
