@@ -8,23 +8,33 @@ import (
 	"strings"
 
 	"github.com/wangwuxing777/Pawrd_Backend/internal/config"
+	"github.com/wangwuxing777/Pawrd_Backend/internal/services/hicustom"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/shopify"
 )
 
 // ShopProduct represents the simplified product format for iOS
 type ShopProduct struct {
-	ID           string   `json:"id"`
-	Title        string   `json:"title"`
-	Description  string   `json:"description"`
-	Price        string   `json:"price"`
-	CurrencyCode string   `json:"currencyCode"`
-	ImageURL     string   `json:"imageUrl"`
-	ProductType  string   `json:"productType"`
-	Categories   []string `json:"categories,omitempty"`
-	Vendor       string   `json:"vendor"`
-	Handle       string   `json:"handle"`
-	VariantID    string   `json:"variantId"`
-	Available    bool     `json:"available"`
+	ID              string   `json:"id"`
+	Title           string   `json:"title"`
+	Description     string   `json:"description"`
+	Price           string   `json:"price"`
+	CurrencyCode    string   `json:"currencyCode"`
+	ImageURL        string   `json:"imageUrl"`
+	ProductType     string   `json:"productType"`
+	Categories      []string `json:"categories,omitempty"`
+	Vendor          string   `json:"vendor"`
+	Handle          string   `json:"handle"`
+	VariantID       string   `json:"variantId"`
+	Available       bool     `json:"available"`
+	// Source identifies the fulfillment pipeline: "shopify" (ready-made) or
+	// "hicustom" (customizable blank). See docs §13.
+	Source string `json:"source"`
+	// Customizable marks products that launch the HiCustom designer instead of
+	// direct add-to-cart. True for hicustom blanks.
+	Customizable bool `json:"customizable,omitempty"`
+	// BlankSKU is the HiCustom blank SKU (hicustom source only). The designer
+	// and checkout use it to look up the blank.
+	BlankSKU         string `json:"blankSku,omitempty"`
 }
 
 // ProductsResponse is the response structure for product list
@@ -49,7 +59,38 @@ func newShopifyClient(cfg *config.Config) (ShopifyClient, error) {
 	return shopify.NewClient(cfg)
 }
 
-// NewShopHandler creates a handler for shop endpoints
+// newHiCustomClient returns a mock when USE_MOCK_HICUSTOM=true (or when creds are
+// absent), so the catalog + designer flow works in dev without HiCustom access.
+func newHiCustomClient(cfg *config.Config) (hicustom.Client, error) {
+	if cfg.UseMockHiCustom || cfg.HiCustomAppKey == "" {
+		return hicustom.NewMockClient(), nil
+	}
+	return hicustom.NewClient(cfg)
+}
+
+// transformBlankProduct converts a hicustom.BlankProduct to ShopProduct.
+func transformBlankProduct(p hicustom.BlankProduct) ShopProduct {
+	return ShopProduct{
+		ID:           "hicustom:" + p.SKU,
+		Title:        p.Title,
+		Description:  p.Description,
+		Price:        p.Price,
+		CurrencyCode: p.CurrencyCode,
+		ImageURL:     p.CoverURL,
+		ProductType:  p.Category,
+		Categories:   []string{p.Category},
+		Vendor:       "HiCustom",
+		Handle:       p.SKU, // reuse Handle field to carry the SKU for detail lookups
+		Available:    p.Available,
+		Source:       "hicustom",
+		Customizable: true,
+		BlankSKU:     p.SKU,
+	}
+}
+
+// NewShopHandler creates a handler for shop endpoints. Aggregates Shopify
+// (ready-made) and HiCustom (customizable blank) products based on the `source`
+// query param: "shopify", "hicustom", or "all" (default). See docs §13.3.
 func NewShopHandler(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		EnableCors(&w)
@@ -61,10 +102,9 @@ func NewShopHandler(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		client, err := newShopifyClient(cfg)
-		if err != nil {
-			http.Error(w, "Shopify configuration error: "+err.Error(), http.StatusInternalServerError)
-			return
+		source := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("source")))
+		if source == "" {
+			source = "all"
 		}
 
 		// Parse query parameters
@@ -76,17 +116,40 @@ func NewShopHandler(cfg *config.Config) http.HandlerFunc {
 		}
 		after := r.URL.Query().Get("cursor")
 
-		// Fetch products from Shopify
-		products, _, _, err := client.FetchProducts(first, after)
-		if err != nil {
-			http.Error(w, "Failed to fetch products: "+err.Error(), http.StatusInternalServerError)
-			return
+		shopProducts := make([]ShopProduct, 0)
+
+		if source == "all" || source == "shopify" {
+			client, err := newShopifyClient(cfg)
+			if err != nil {
+				http.Error(w, "Shopify configuration error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			products, _, _, err := client.FetchProducts(first, after)
+			if err != nil {
+				http.Error(w, "Failed to fetch products: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			for _, p := range products {
+				sp := transformProduct(p)
+				sp.Source = "shopify"
+				shopProducts = append(shopProducts, sp)
+			}
 		}
 
-		// Transform to iOS format
-		shopProducts := make([]ShopProduct, 0, len(products))
-		for _, p := range products {
-			shopProducts = append(shopProducts, transformProduct(p))
+		if source == "all" || source == "hicustom" {
+			client, err := newHiCustomClient(cfg)
+			if err != nil {
+				http.Error(w, "HiCustom configuration error: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			result, err := client.FetchBlankProducts(first, after)
+			if err != nil {
+				http.Error(w, "Failed to fetch HiCustom products: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			for _, p := range result.Products {
+				shopProducts = append(shopProducts, transformBlankProduct(p))
+			}
 		}
 
 		// Return response as raw array (iOS expects array, not wrapped object)

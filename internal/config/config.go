@@ -37,8 +37,13 @@ type Config struct {
 	ShopifyStorefrontPrivateToken string
 	ShopifyStorefrontToken        string
 	UseMockShopify                bool
+	HiCustomBaseURL               string
+	HiCustomAppKey                string
+	HiCustomAppSecret             string
+	UseMockHiCustom               bool
 	StripeSecretKey               string
 	StripePublishableKey          string
+	StripeWebhookSecret           string
 }
 
 func LoadConfig() *Config {
@@ -73,8 +78,13 @@ func LoadConfig() *Config {
 		ShopifyStorefrontPrivateToken: strings.TrimSpace(os.Getenv("SHOPIFY_STOREFRONT_PRIVATE_TOKEN")),
 		ShopifyStorefrontToken:        strings.TrimSpace(os.Getenv("SHOPIFY_STOREFRONT_TOKEN")),
 		UseMockShopify:                os.Getenv("USE_MOCK_SHOPIFY") == "true",
+		HiCustomBaseURL:               strings.TrimSpace(getEnvOrDefault("HICUSTOM_BASE_URL", "https://open.hicustom.com")),
+		HiCustomAppKey:                strings.TrimSpace(os.Getenv("HICUSTOM_APP_KEY")),
+		HiCustomAppSecret:             strings.TrimSpace(os.Getenv("HICUSTOM_APP_SECRET")),
+		UseMockHiCustom:               os.Getenv("USE_MOCK_HICUSTOM") == "true",
 		StripeSecretKey:               strings.TrimSpace(os.Getenv("STRIPE_SECRET_KEY")),
 		StripePublishableKey:          strings.TrimSpace(os.Getenv("STRIPE_PUBLISHABLE_KEY")),
+		StripeWebhookSecret:           strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET")),
 	}
 }
 
@@ -85,6 +95,17 @@ func (c *Config) ValidateShopifyConfig() error {
 	}
 	if c.ShopifyStorefrontPrivateToken == "" && c.ShopifyStorefrontToken == "" {
 		return fmt.Errorf("SHOPIFY_STOREFRONT_PRIVATE_TOKEN environment variable is required (SHOPIFY_STOREFRONT_TOKEN is supported only as a legacy fallback)")
+	}
+	return nil
+}
+
+// ValidateHiCustomConfig checks if HiCustom configuration is properly set.
+func (c *Config) ValidateHiCustomConfig() error {
+	if c.HiCustomAppKey == "" {
+		return fmt.Errorf("HICUSTOM_APP_KEY environment variable is required")
+	}
+	if c.HiCustomAppSecret == "" {
+		return fmt.Errorf("HICUSTOM_APP_SECRET environment variable is required")
 	}
 	return nil
 }

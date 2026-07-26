@@ -31,6 +31,11 @@ func setupPostsTestDB(t *testing.T) *gorm.DB {
 		&models.PostLike{},
 		&models.PostComment{},
 		&models.PostCollection{},
+		&models.UserFollow{},
+		&models.FamilyFollow{},
+		&models.PostPoll{},
+		&models.PostPollOption{},
+		&models.PostPollVote{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -149,5 +154,60 @@ func TestCreatePostRejectsCrossFamilyPetTags(t *testing.T) {
 	}
 	if tags != 0 {
 		t.Fatalf("expected no tags persisted, got %d", tags)
+	}
+}
+
+func TestFollowingFeedUsesFollowedAuthorsOnly(t *testing.T) {
+	db := setupPostsTestDB(t)
+
+	families := []models.Family{
+		{ID: "family-author", OwnerUserID: "author-1", DisplayName: "Author Family", Handle: "author-family"},
+		{ID: "family-only", OwnerUserID: "author-2", DisplayName: "Family Only", Handle: "family-only"},
+	}
+	for _, family := range families {
+		if err := db.Create(&family).Error; err != nil {
+			t.Fatalf("seed family: %v", err)
+		}
+	}
+
+	posts := []models.Post{
+		{ID: "post-followed-author", AuthorID: "author-1", FamilyID: "family-author", Title: "Followed author"},
+		{ID: "post-followed-family-only", AuthorID: "author-2", FamilyID: "family-only", Title: "Family follow only"},
+		{ID: "post-unfollowed", AuthorID: "author-3", Title: "Unfollowed"},
+	}
+	for _, post := range posts {
+		if err := db.Create(&post).Error; err != nil {
+			t.Fatalf("seed post: %v", err)
+		}
+	}
+
+	if err := db.Create(&models.UserFollow{
+		FollowerID: "viewer",
+		FolloweeID: "author-1",
+	}).Error; err != nil {
+		t.Fatalf("seed user follow: %v", err)
+	}
+	if err := db.Create(&models.FamilyFollow{
+		FamilyID:       "family-only",
+		FollowerUserID: "viewer",
+	}).Error; err != nil {
+		t.Fatalf("seed family follow: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/posts?feed=following&limit=20", nil)
+	req.Header.Set("X-User-Id", "viewer")
+	rec := httptest.NewRecorder()
+	NewPostsHandler(db).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var got []models.BlogPost
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "post-followed-author" {
+		t.Fatalf("expected only followed author's post, got %+v", got)
 	}
 }

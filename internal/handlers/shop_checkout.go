@@ -11,12 +11,17 @@ import (
 	"github.com/wangwuxing777/Pawrd_Backend/internal/config"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/payments"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/shopify"
+	"gorm.io/gorm"
 )
 
 type ShopCheckoutLineItemRequest struct {
 	Handle    string `json:"handle"`
 	VariantID string `json:"variantId"`
 	Quantity  int    `json:"quantity"`
+	// Source identifies the fulfillment pipeline. Empty defaults to "shopify".
+	// "hicustom" is reserved for Phase C (custom products); checkout currently
+	// only emits shopify items. See docs/hicustom_integration_design.md §13.
+	Source string `json:"source,omitempty"`
 }
 
 type ShopCheckoutCustomerRequest struct {
@@ -38,7 +43,7 @@ type ShopPaymentSheetResponse struct {
 	Currency                  string `json:"currency"`
 }
 
-func NewShopPaymentSheetHandler(cfg *config.Config) http.HandlerFunc {
+func NewShopPaymentSheetHandler(cfg *config.Config, db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		EnableCors(&w)
 		if r.Method == http.MethodOptions {
@@ -72,7 +77,7 @@ func NewShopPaymentSheetHandler(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		amount, currency, description, metadata, err := buildCheckoutPaymentData(shopifyClient, req)
+		amount, currency, description, metadata, err := buildCheckoutPaymentData(shopifyClient, db, req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -108,7 +113,7 @@ func NewShopPaymentSheetHandler(cfg *config.Config) http.HandlerFunc {
 	}
 }
 
-func buildCheckoutPaymentData(client ShopifyClient, req ShopPaymentSheetRequest) (int64, string, string, map[string]string, error) {
+func buildCheckoutPaymentData(client ShopifyClient, db *gorm.DB, req ShopPaymentSheetRequest) (int64, string, string, map[string]string, error) {
 	var totalAmount int64
 	var currency string
 	var totalQuantity int
@@ -116,30 +121,68 @@ func buildCheckoutPaymentData(client ShopifyClient, req ShopPaymentSheetRequest)
 	metadata := map[string]string{}
 
 	for index, item := range req.LineItems {
-		handle := strings.TrimSpace(item.Handle)
-		if handle == "" {
-			return 0, "", "", nil, fmt.Errorf("line item handle is required")
-		}
 		if item.Quantity <= 0 {
 			return 0, "", "", nil, fmt.Errorf("quantity must be greater than zero")
 		}
 
-		product, err := client.FetchProductByHandle(handle)
-		if err != nil {
-			return 0, "", "", nil, fmt.Errorf("failed to fetch product '%s': %w", handle, err)
+		source := strings.TrimSpace(strings.ToLower(item.Source))
+		if source == "" {
+			source = "shopify"
 		}
 
-		variant, err := findCheckoutVariant(product, item.VariantID)
-		if err != nil {
-			return 0, "", "", nil, err
-		}
-		if !variant.AvailableForSale {
-			return 0, "", "", nil, fmt.Errorf("variant '%s' is currently unavailable", variant.Title)
+		var title, lineCurrency, linePrice, metaHandle, metaVariant string
+
+		switch source {
+		case "hicustom":
+			// HiCustom line item: price comes from the cached BlankProduct (by SKU).
+			// `Handle` carries the blank SKU for hicustom items (see transformBlankProduct).
+			sku := strings.TrimSpace(item.Handle)
+			if sku == "" {
+				return 0, "", "", nil, fmt.Errorf("hicustom line item sku is required")
+			}
+			if db == nil {
+				return 0, "", "", nil, fmt.Errorf("hicustom checkout requires a database connection")
+			}
+			bp, err := blankProductPrice(db, sku)
+			if err != nil {
+				return 0, "", "", nil, fmt.Errorf("failed to fetch blank product '%s': %w", sku, err)
+			}
+			if !bp.Available {
+				return 0, "", "", nil, fmt.Errorf("blank product '%s' is currently unavailable", bp.Title)
+			}
+			title = bp.Title
+			lineCurrency = strings.ToLower(strings.TrimSpace(bp.CurrencyCode))
+			linePrice = bp.Price
+			metaHandle = sku
+			// customProductId travels via VariantID field reuse so the webhook
+			// can push the exact design to HiCustom. TODO: add a dedicated field.
+			metaVariant = strings.TrimSpace(item.VariantID)
+
+		default: // "shopify"
+			handle := strings.TrimSpace(item.Handle)
+			if handle == "" {
+				return 0, "", "", nil, fmt.Errorf("line item handle is required")
+			}
+			product, err := client.FetchProductByHandle(handle)
+			if err != nil {
+				return 0, "", "", nil, fmt.Errorf("failed to fetch product '%s': %w", handle, err)
+			}
+			variant, err := findCheckoutVariant(product, item.VariantID)
+			if err != nil {
+				return 0, "", "", nil, err
+			}
+			if !variant.AvailableForSale {
+				return 0, "", "", nil, fmt.Errorf("variant '%s' is currently unavailable", variant.Title)
+			}
+			title = product.Title
+			lineCurrency = strings.ToLower(strings.TrimSpace(variant.Price.CurrencyCode))
+			linePrice = variant.Price.Amount
+			metaHandle = product.Handle
+			metaVariant = variant.ID
 		}
 
-		lineCurrency := strings.ToLower(strings.TrimSpace(variant.Price.CurrencyCode))
 		if lineCurrency == "" {
-			return 0, "", "", nil, fmt.Errorf("product '%s' is missing currency code", product.Title)
+			return 0, "", "", nil, fmt.Errorf("product '%s' is missing currency code", title)
 		}
 		if currency == "" {
 			currency = lineCurrency
@@ -147,15 +190,21 @@ func buildCheckoutPaymentData(client ShopifyClient, req ShopPaymentSheetRequest)
 			return 0, "", "", nil, fmt.Errorf("all items in a checkout must use the same currency")
 		}
 
-		unitAmount, err := parseAmountToMinorUnits(variant.Price.Amount)
+		unitAmount, err := parseAmountToMinorUnits(linePrice)
 		if err != nil {
-			return 0, "", "", nil, fmt.Errorf("invalid price for product '%s': %w", product.Title, err)
+			return 0, "", "", nil, fmt.Errorf("invalid price for product '%s': %w", title, err)
 		}
 
 		totalAmount += unitAmount * int64(item.Quantity)
 		totalQuantity += item.Quantity
-		itemDescriptions = append(itemDescriptions, fmt.Sprintf("%s x%d", product.Title, item.Quantity))
-		metadata[fmt.Sprintf("item_%d", index+1)] = fmt.Sprintf("%s | %s | qty:%d", product.Handle, variant.ID, item.Quantity)
+		itemDescriptions = append(itemDescriptions, fmt.Sprintf("%s x%d", title, item.Quantity))
+
+		// source-tagged so the Stripe webhook can route fulfillment by pipeline.
+		// Parsed by payments.ParseItemsFromMetadata.
+		metadata[fmt.Sprintf("item_%d", index+1)] = fmt.Sprintf(
+			"source=%s | handle=%s | variant=%s | qty:%d",
+			source, metaHandle, metaVariant, item.Quantity,
+		)
 	}
 
 	metadata["customer_name"] = strings.TrimSpace(req.Customer.Name)

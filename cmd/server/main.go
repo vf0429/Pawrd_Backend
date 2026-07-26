@@ -15,6 +15,7 @@ import (
 	"github.com/wangwuxing777/Pawrd_Backend/internal/handlers"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/models"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/merchant"
+	"github.com/wangwuxing777/Pawrd_Backend/internal/services/payments"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/places"
 )
 
@@ -111,6 +112,10 @@ func main() {
 	cfg := config.LoadConfig()
 	merchantVaccinationClient := merchant.NewClient(cfg)
 	handlers.SetMirrorFreshnessWindow(bookingFreshnessWindowConfig())
+
+	// Order fulfillment dispatcher — routes paid orders to the correct pipeline
+	// (shopify now, hicustom reserved for Phase C). Driven by the Stripe webhook.
+	fulfiller := payments.NewDispatcher()
 
 	// Parse flags for seeding DB
 	seedDB := flag.Bool("seed", false, "Seed the database with initial scenario data")
@@ -236,7 +241,13 @@ func main() {
 	mux.HandleFunc("/api/shop/products/{handle}", handlers.NewShopProductDetailHandler(cfg))
 	mux.HandleFunc("/api/shop/categories", handlers.NewShopCategoriesHandler(cfg))
 	mux.HandleFunc("/api/shop/search", handlers.NewShopSearchHandler(cfg))
-	mux.HandleFunc("/api/shop/checkout/payment-sheet", handlers.NewShopPaymentSheetHandler(cfg))
+	mux.HandleFunc("/api/shop/checkout/payment-sheet", handlers.NewShopPaymentSheetHandler(cfg, db))
+	mux.HandleFunc("/api/payments/webhook", handlers.NewPaymentsWebhookHandler(cfg, fulfiller))
+
+	// HiCustom (custom products) handlers — designer entry + design persistence.
+	mux.HandleFunc("/api/shop/hicustom/designer-url", handlers.NewHiCustomDesignerURLHandler(cfg))
+	mux.HandleFunc("/api/shop/hicustom/designs", handlers.NewHiCustomDesignCreateHandler(cfg, db))
+	mux.HandleFunc("/api/shop/hicustom/designs/{id}", handlers.NewHiCustomDesignDetailHandler(db))
 
 	// Medical services handlers (public + admin)
 	mux.HandleFunc("/api/medical/services", handlers.NewMedicalServicesHandler(db))

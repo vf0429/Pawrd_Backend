@@ -52,13 +52,11 @@ func toBlogPost(db *gorm.DB, p models.Post, requesterID string) models.BlogPost 
 	}
 	familyHandle := ""
 	familyName := ""
-	viewerCanFollowFamily := false
 	if db != nil && strings.TrimSpace(p.FamilyID) != "" {
 		var family models.Family
 		if err := db.Select("id", "handle", "display_name").First(&family, "id = ?", p.FamilyID).Error; err == nil {
 			familyHandle = family.Handle
 			familyName = family.DisplayName
-			viewerCanFollowFamily = requesterID != "" && requesterID != family.OwnerUserID
 		}
 	}
 	return models.BlogPost{
@@ -67,7 +65,6 @@ func toBlogPost(db *gorm.DB, p models.Post, requesterID string) models.BlogPost 
 		FamilyID:     p.FamilyID,
 		FamilyHandle: familyHandle,
 		FamilyName:   familyName,
-		ViewerCanFollowFamily: viewerCanFollowFamily,
 		AuthorName:   p.AuthorName,
 		AuthorAvatar: p.AuthorAvatar,
 		Title:        p.Title,
@@ -366,15 +363,15 @@ func NewPostsHandler(db *gorm.DB) http.HandlerFunc {
 					requesterID = followerID
 				}
 
-				var followedFamilyIDs []string
-				if err := db.Model(&models.FamilyFollow{}).
-					Where("follower_user_id = ?", followerID).
-					Pluck("family_id", &followedFamilyIDs).Error; err != nil {
-					http.Error(w, "Failed to fetch followed families: "+err.Error(), http.StatusInternalServerError)
+				var followedAuthorIDs []string
+				if err := db.Model(&models.UserFollow{}).
+					Where("follower_id = ?", followerID).
+					Pluck("followee_id", &followedAuthorIDs).Error; err != nil {
+					http.Error(w, "Failed to fetch followed authors: "+err.Error(), http.StatusInternalServerError)
 					return
 				}
 
-				if len(followedFamilyIDs) == 0 {
+				if len(followedAuthorIDs) == 0 {
 					w.Header().Set("Content-Type", "application/json")
 					if usePaging {
 						w.Header().Set("X-Has-More", "false")
@@ -383,7 +380,7 @@ func NewPostsHandler(db *gorm.DB) http.HandlerFunc {
 					return
 				}
 
-				query = query.Where("family_id IN ?", followedFamilyIDs)
+				query = query.Where("author_id IN ?", followedAuthorIDs)
 			} else if feedType == "my_posts" {
 				if requesterID == "" {
 					http.Error(w, "missing user id", http.StatusUnauthorized)
@@ -663,7 +660,6 @@ func NewPostsHandler(db *gorm.DB) http.HandlerFunc {
 				Comments:     0,
 				Timestamp:    post.CreatedAt,
 				ImageUrls:    body.ImageUrls,
-				ViewerCanFollowFamily: false,
 			}
 			if len(body.ImageMeta) > 0 {
 				meta := make([]models.BlogImageMeta, 0, len(body.ImageMeta))

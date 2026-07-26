@@ -248,6 +248,7 @@ func NewUserFollowersDetailHandler(db *gorm.DB) http.HandlerFunc {
 //   - followerCount:  users following this user
 //   - followingCount: users this user follows
 //   - likeCount:      total likes received across all of the user's posts
+//   - collectCount:   total saves received across all of the user's posts
 //   - viewCount:      total views across all of the user's posts
 //
 // When called with an X-User-Id header, also reports whether the requester
@@ -285,6 +286,13 @@ func NewUserStatsHandler(db *gorm.DB) http.HandlerFunc {
 				db.Model(&models.Post{}).Select("id").Where("author_id = ?", userID),
 			).Count(&likeCount)
 
+		// Total saves received across the user's posts.
+		var collectCount int64
+		db.Model(&models.PostCollection{}).
+			Where("post_id IN (?)",
+				db.Model(&models.Post{}).Select("id").Where("author_id = ?", userID),
+			).Count(&collectCount)
+
 		// Total views across the user's posts.
 		var viewSum struct{ Total int64 }
 		db.Model(&models.Post{}).
@@ -307,6 +315,7 @@ func NewUserStatsHandler(db *gorm.DB) http.HandlerFunc {
 			"followerCount":  int(followerCount),
 			"followingCount": int(followingCount),
 			"likeCount":      int(likeCount),
+			"collectCount":   int(collectCount),
 			"viewCount":      int(viewSum.Total),
 			"isFollowing":    isFollowing,
 		})
