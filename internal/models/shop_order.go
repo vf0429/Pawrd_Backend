@@ -5,27 +5,27 @@ import "time"
 // ShopOrder is Pawrd's durable mirror of a paid Shopify order. Stripe remains
 // the payment processor; Shopify is used for merchant operations and returns.
 type ShopOrder struct {
-	ID                   string `gorm:"primaryKey;size:36"`
-	UserID               string `gorm:"index;size:36;not null"`
-	PaymentIntentID      string `gorm:"uniqueIndex;size:255;not null"`
-	ShopifyOrderID       string `gorm:"uniqueIndex;size:255"`
-	ShopifyOrderLegacyID string `gorm:"index;size:64"`
-	ShopifyOrderName     string `gorm:"size:64"`
-	Status               string `gorm:"index;size:32;not null"`
-	FinancialStatus      string `gorm:"size:32"`
-	FulfillmentStatus    string `gorm:"size:32"`
-	Currency             string `gorm:"size:8;not null"`
-	TotalAmountMinor     int64  `gorm:"not null"`
-	CustomerName         string `gorm:"size:160"`
-	CustomerEmail        string `gorm:"size:254"`
-	CustomerPhone        string `gorm:"size:32"`
-	ShippingAddress1     string `gorm:"size:255"`
-	ShippingDistrict     string `gorm:"size:100"`
-	ShippingRegion       string `gorm:"size:100"`
-	ShippingCountry      string `gorm:"size:100"`
-	TrackingCompany      string `gorm:"size:120"`
-	TrackingNumber       string `gorm:"size:160"`
-	TrackingURL          string `gorm:"size:500"`
+	ID                   string  `gorm:"primaryKey;size:36"`
+	UserID               string  `gorm:"index;size:36;not null"`
+	PaymentIntentID      string  `gorm:"uniqueIndex;size:255;not null"`
+	ShopifyOrderID       *string `gorm:"uniqueIndex;size:255"`
+	ShopifyOrderLegacyID string  `gorm:"index;size:64"`
+	ShopifyOrderName     string  `gorm:"size:64"`
+	Status               string  `gorm:"index;size:32;not null"`
+	FinancialStatus      string  `gorm:"size:32"`
+	FulfillmentStatus    string  `gorm:"size:32"`
+	Currency             string  `gorm:"size:8;not null"`
+	TotalAmountMinor     int64   `gorm:"not null"`
+	CustomerName         string  `gorm:"size:160"`
+	CustomerEmail        string  `gorm:"size:254"`
+	CustomerPhone        string  `gorm:"size:32"`
+	ShippingAddress1     string  `gorm:"size:255"`
+	ShippingDistrict     string  `gorm:"size:100"`
+	ShippingRegion       string  `gorm:"size:100"`
+	ShippingCountry      string  `gorm:"size:100"`
+	TrackingCompany      string  `gorm:"size:120"`
+	TrackingNumber       string  `gorm:"size:160"`
+	TrackingURL          string  `gorm:"size:500"`
 	EstimatedDeliveryAt  *time.Time
 	DeliveredAt          *time.Time
 	CustomerReceivedAt   *time.Time
@@ -38,6 +38,16 @@ type ShopOrder struct {
 	Items                []ShopOrderItem `gorm:"foreignKey:OrderID;constraint:OnDelete:CASCADE"`
 	CreatedAt            time.Time
 	UpdatedAt            time.Time
+}
+
+// ShopifyOrderGID returns the Shopify Admin GraphQL order ID when fulfillment
+// has created one. Pending Stripe checkouts intentionally keep this column NULL
+// so the unique index does not treat every unfulfilled order as the same value.
+func (o ShopOrder) ShopifyOrderGID() string {
+	if o.ShopifyOrderID == nil {
+		return ""
+	}
+	return *o.ShopifyOrderID
 }
 
 type ShopOrderItem struct {

@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -151,7 +152,7 @@ func NewShopPaymentSheetHandler(cfg *config.Config, db *gorm.DB) http.HandlerFun
 		for index := range order.Items {
 			order.Items[index].OrderID = orderID
 		}
-		if err := db.Create(&order).Error; err != nil {
+		if err := persistCheckoutOrder(db, &order, stripeService.CancelPaymentIntent); err != nil {
 			http.Error(w, "Failed to persist checkout order", http.StatusInternalServerError)
 			return
 		}
@@ -167,6 +168,30 @@ func NewShopPaymentSheetHandler(cfg *config.Config, db *gorm.DB) http.HandlerFun
 			PaymentIntentID:           intent.PaymentIntentID,
 		})
 	}
+}
+
+type paymentIntentCancelFunc func(string) error
+
+func persistCheckoutOrder(db *gorm.DB, order *models.ShopOrder, cancelPaymentIntent paymentIntentCancelFunc) error {
+	if err := db.Create(order).Error; err != nil {
+		log.Printf(
+			"[shop-checkout] persist order failed order=%s payment_intent=%s: %v",
+			order.ID,
+			order.PaymentIntentID,
+			err,
+		)
+		if cancelPaymentIntent != nil {
+			if cancelErr := cancelPaymentIntent(order.PaymentIntentID); cancelErr != nil {
+				log.Printf(
+					"[shop-checkout] cancel orphan payment intent failed payment_intent=%s: %v",
+					order.PaymentIntentID,
+					cancelErr,
+				)
+			}
+		}
+		return err
+	}
+	return nil
 }
 
 func buildCheckoutPaymentData(client ShopifyClient, db *gorm.DB, req ShopPaymentSheetRequest) (int64, string, string, map[string]string, []models.ShopOrderItem, error) {

@@ -71,6 +71,9 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to auto migrate schema: %w", err)
 	}
+	if err := normalizePendingShopOrderIDs(db); err != nil {
+		return nil, fmt.Errorf("failed to normalize pending shop orders: %w", err)
+	}
 
 	// If using PostgreSQL, migrate Auth schema to the same database
 	if dsn != "" {
@@ -84,6 +87,12 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 
 	log.Println("Database connection established and models migrated.")
 	return db, nil
+}
+
+func normalizePendingShopOrderIDs(db *gorm.DB) error {
+	return db.Model(&ShopOrder{}).
+		Where("shopify_order_id = ?", "").
+		Update("shopify_order_id", nil).Error
 }
 
 // InitAuthDB opens a separate SQLite database for user authentication

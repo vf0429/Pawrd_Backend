@@ -77,7 +77,7 @@ func TestShopOrderReturnRequestIsOwnedConfirmedAndSynced(t *testing.T) {
 	receivedAt := time.Now().UTC()
 	order := models.ShopOrder{
 		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: "pi_1",
-		ShopifyOrderID: "gid://shopify/Order/1", Status: "received",
+		ShopifyOrderID: shopOrderStringPointer("gid://shopify/Order/1"), Status: "received",
 		FinancialStatus: "paid", FulfillmentStatus: "DELIVERED", Currency: "HKD",
 		TotalAmountMinor: 1000, CustomerReceivedAt: &receivedAt,
 	}
@@ -128,7 +128,7 @@ func TestShopOrderReceiptSyncsTagWithoutFakingDelivery(t *testing.T) {
 	db := newShopOrderTestDB(t)
 	order := models.ShopOrder{
 		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: "pi_2",
-		ShopifyOrderID: "gid://shopify/Order/2", Status: "shipped",
+		ShopifyOrderID: shopOrderStringPointer("gid://shopify/Order/2"), Status: "shipped",
 		FulfillmentStatus: "IN_TRANSIT", Currency: "HKD", TotalAmountMinor: 1000,
 	}
 	if err := db.Create(&order).Error; err != nil {
@@ -147,4 +147,8 @@ func TestShopOrderReceiptSyncsTagWithoutFakingDelivery(t *testing.T) {
 	if updated.CustomerReceivedAt == nil || updated.FulfillmentStatus != "IN_TRANSIT" {
 		t.Fatalf("receipt should not overwrite carrier state: %+v", updated)
 	}
+}
+
+func shopOrderStringPointer(value string) *string {
+	return &value
 }

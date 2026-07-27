@@ -109,7 +109,7 @@ func (d *Dispatcher) fulfillShopify(req FulfillmentRequest) error {
 	if err := d.db.Preload("Items").Where("payment_intent_id = ?", req.PaymentIntentID).First(&order).Error; err != nil {
 		return fmt.Errorf("load shop order: %w", err)
 	}
-	if order.ShopifyOrderID != "" {
+	if order.ShopifyOrderGID() != "" {
 		return nil
 	}
 	if err := d.db.Model(&order).Updates(map[string]any{

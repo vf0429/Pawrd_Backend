@@ -86,8 +86,9 @@ func NewShopOrderDetailHandler(db *gorm.DB, admin shopify.AdminOrderClient) http
 		if !ok {
 			return
 		}
-		if admin != nil && order.ShopifyOrderID != "" {
-			if snapshot, err := admin.FetchOrder(r.Context(), order.ShopifyOrderID); err == nil {
+		shopifyOrderID := order.ShopifyOrderGID()
+		if admin != nil && shopifyOrderID != "" {
+			if snapshot, err := admin.FetchOrder(r.Context(), shopifyOrderID); err == nil {
 				updates := map[string]any{
 					"fulfillment_status":    snapshot.FulfillmentStatus,
 					"tracking_company":      snapshot.TrackingCompany,
@@ -131,11 +132,12 @@ func NewShopOrderReceivedHandler(db *gorm.DB, admin shopify.AdminOrderClient) ht
 			http.Error(w, "order cannot be confirmed as received", http.StatusConflict)
 			return
 		}
-		if admin == nil || order.ShopifyOrderID == "" {
+		shopifyOrderID := order.ShopifyOrderGID()
+		if admin == nil || shopifyOrderID == "" {
 			http.Error(w, "Shopify order service is unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		if err := admin.AddOrderTags(r.Context(), order.ShopifyOrderID, []string{"Pawrd: customer received"}); err != nil {
+		if err := admin.AddOrderTags(r.Context(), shopifyOrderID, []string{"Pawrd: customer received"}); err != nil {
 			http.Error(w, "failed to sync receipt confirmation", http.StatusBadGateway)
 			return
 		}
@@ -193,11 +195,12 @@ func NewShopOrderReturnHandler(db *gorm.DB, admin shopify.AdminOrderClient) http
 			http.Error(w, "order is not eligible for a return request", http.StatusConflict)
 			return
 		}
-		if admin == nil || order.ShopifyOrderID == "" {
+		shopifyOrderID := order.ShopifyOrderGID()
+		if admin == nil || shopifyOrderID == "" {
 			http.Error(w, "Shopify order service is unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		result, err := admin.RequestReturn(r.Context(), order.ShopifyOrderID, req.Reason, strings.TrimSpace(req.Note))
+		result, err := admin.RequestReturn(r.Context(), shopifyOrderID, req.Reason, strings.TrimSpace(req.Note))
 		if err != nil {
 			http.Error(w, "Shopify return request failed: "+err.Error(), http.StatusBadGateway)
 			return

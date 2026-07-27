@@ -90,3 +90,21 @@ func (s *StripeService) CreatePaymentIntent(req CreatePaymentIntentRequest) (*Cr
 		PublishableKey:  s.publishableKey,
 	}, nil
 }
+
+// CancelPaymentIntent compensates for a local checkout failure after Stripe has
+// already created an intent. It prevents an orphan intent from being confirmed
+// without a durable Pawrd order to receive the payment webhook.
+func (s *StripeService) CancelPaymentIntent(paymentIntentID string) error {
+	paymentIntentID = strings.TrimSpace(paymentIntentID)
+	if paymentIntentID == "" {
+		return fmt.Errorf("payment intent ID is required")
+	}
+
+	_, err := paymentintent.Cancel(paymentIntentID, &stripe.PaymentIntentCancelParams{
+		CancellationReason: stripe.String(stripe.PaymentIntentCancellationReasonAbandoned),
+	})
+	if err != nil {
+		return fmt.Errorf("cancel payment intent: %w", err)
+	}
+	return nil
+}
