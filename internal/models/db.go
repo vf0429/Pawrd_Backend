@@ -64,6 +64,9 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 		&BlankProduct{},
 		&CustomDesign{},
 		&HiCustomOrder{},
+		&ShopOrder{},
+		&ShopOrderItem{},
+		&ShopIntegrationEvent{},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to auto migrate schema: %w", err)

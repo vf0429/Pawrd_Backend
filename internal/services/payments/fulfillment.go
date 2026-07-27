@@ -1,10 +1,15 @@
 package payments
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strconv"
 	"strings"
+
+	"github.com/wangwuxing777/Pawrd_Backend/internal/models"
+	"github.com/wangwuxing777/Pawrd_Backend/internal/services/shopify"
+	"gorm.io/gorm"
 )
 
 // ItemSource identifies which fulfillment pipeline handles a line item.
@@ -40,16 +45,19 @@ type Fulfiller interface {
 	Fulfill(req FulfillmentRequest) error
 }
 
-// Dispatcher routes line items by Source. Phase B implements the shopify branch
-// (placeholder/self-fulfillment) and reserves the hicustom branch for Phase C,
-// where hicustom.Client.CreateOrder will be wired in.
+// Dispatcher routes paid line items by source. Shopify orders are created through
+// Admin GraphQL; the HiCustom branch remains reserved for the factory integration.
 type Dispatcher struct {
-	// hiCustomOrders reserved for Phase C (hicustom.Client). nil = not yet wired.
+	db           *gorm.DB
+	shopifyAdmin shopify.AdminOrderClient
 }
 
-// NewDispatcher builds a Dispatcher. The HiCustom client dependency is intentionally
-// absent in Phase B; it will be injected here once the hicustom service exists.
+// NewDispatcher preserves the metadata-routing test/legacy constructor.
 func NewDispatcher() *Dispatcher { return &Dispatcher{} }
+
+func NewOrderDispatcher(db *gorm.DB, admin shopify.AdminOrderClient) *Dispatcher {
+	return &Dispatcher{db: db, shopifyAdmin: admin}
+}
 
 // Fulfill routes each item to its pipeline. Single-source-per-order is the
 // supported shape (see docs/hicustom_integration_design.md §13.3); a mixed
@@ -58,29 +66,98 @@ func (d *Dispatcher) Fulfill(req FulfillmentRequest) error {
 	if len(req.Items) == 0 {
 		return fmt.Errorf("fulfillment: no items for payment %s", req.PaymentIntentID)
 	}
-	for _, it := range req.Items {
-		switch it.Source {
-		case SourceShopify:
-			if err := d.fulfillShopify(req, it); err != nil {
-				return err
+	if d.db == nil {
+		for _, item := range req.Items {
+			switch item.Source {
+			case SourceShopify:
+				log.Printf("[fulfillment][shopify] payment=%s handle=%s variant=%s qty=%d", req.PaymentIntentID, item.Handle, item.VariantID, item.Quantity)
+			case SourceHiCustom:
+				if err := d.fulfillHiCustom(req, item); err != nil {
+					return err
+				}
 			}
-		case SourceHiCustom:
+		}
+		return nil
+	}
+	source := req.Items[0].Source
+	for _, it := range req.Items {
+		if it.Source != source {
+			return fmt.Errorf("fulfillment: mixed-source order %s is not supported", req.PaymentIntentID)
+		}
+	}
+	switch source {
+	case SourceShopify:
+		return d.fulfillShopify(req)
+	case SourceHiCustom:
+		for _, it := range req.Items {
 			if err := d.fulfillHiCustom(req, it); err != nil {
 				return err
 			}
-		default:
-			log.Printf("[fulfillment] unknown source %q for payment %s, skipping", it.Source, req.PaymentIntentID)
 		}
+	default:
+		return fmt.Errorf("fulfillment: unknown source %q", source)
 	}
 	return nil
 }
 
-func (d *Dispatcher) fulfillShopify(req FulfillmentRequest, it FulfillmentItem) error {
-	// Phase B: reliable server-side acknowledgement only. Shopify Admin API order
-	// creation (or self-fulfillment) lands in a later step — see design §13.5.
-	log.Printf("[fulfillment][shopify] payment=%s handle=%s variant=%s qty=%d customer=%s — TODO create Shopify order",
-		req.PaymentIntentID, it.Handle, it.VariantID, it.Quantity, req.CustomerEmail)
-	return nil
+func (d *Dispatcher) fulfillShopify(req FulfillmentRequest) error {
+	if d.db == nil {
+		log.Printf("[fulfillment][shopify] payment=%s — no order database configured", req.PaymentIntentID)
+		return nil
+	}
+	var order models.ShopOrder
+	if err := d.db.Preload("Items").Where("payment_intent_id = ?", req.PaymentIntentID).First(&order).Error; err != nil {
+		return fmt.Errorf("load shop order: %w", err)
+	}
+	if order.ShopifyOrderID != "" {
+		return nil
+	}
+	if err := d.db.Model(&order).Updates(map[string]any{
+		"status": "paid", "financial_status": "paid", "failure_reason": "",
+	}).Error; err != nil {
+		return err
+	}
+	if d.shopifyAdmin == nil {
+		return fmt.Errorf("shopify admin client is not configured")
+	}
+	lines := make([]shopify.AdminOrderLineInput, 0, len(order.Items))
+	for _, item := range order.Items {
+		lines = append(lines, shopify.AdminOrderLineInput{VariantID: item.VariantID, Quantity: item.Quantity})
+	}
+	result, err := d.shopifyAdmin.CreateOrder(context.Background(), shopify.AdminOrderInput{
+		Currency:        order.Currency,
+		CustomerEmail:   order.CustomerEmail,
+		CustomerPhone:   order.CustomerPhone,
+		ShippingName:    order.CustomerName,
+		ShippingPhone:   order.CustomerPhone,
+		ShippingAddress: order.ShippingAddress1,
+		ShippingCity:    order.ShippingDistrict,
+		ShippingRegion:  order.ShippingRegion,
+		Amount:          fmt.Sprintf("%.2f", float64(order.TotalAmountMinor)/100),
+		PaymentID:       order.PaymentIntentID,
+		Lines:           lines,
+	})
+	if err != nil {
+		_ = d.db.Model(&order).Updates(map[string]any{"status": "failed", "failure_reason": err.Error()}).Error
+		return err
+	}
+	return d.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&order).Updates(map[string]any{
+			"shopify_order_id": result.ID, "shopify_order_legacy_id": result.LegacyID,
+			"shopify_order_name": result.Name, "status": "processing",
+			"financial_status": "paid", "failure_reason": "",
+		}).Error; err != nil {
+			return err
+		}
+		for index, lineID := range result.LineItemIDs {
+			if index < len(order.Items) {
+				if err := tx.Model(&order.Items[index]).Update("shopify_line_item_id", lineID).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
 }
 
 func (d *Dispatcher) fulfillHiCustom(req FulfillmentRequest, it FulfillmentItem) error {

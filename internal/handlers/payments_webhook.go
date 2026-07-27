@@ -5,11 +5,15 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/stripe/stripe-go/v82"
 	"github.com/stripe/stripe-go/v82/webhook"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/config"
+	"github.com/wangwuxing777/Pawrd_Backend/internal/models"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/payments"
+	"gorm.io/gorm"
 )
 
 // NewPaymentsWebhookHandler handles Stripe webhook events. In Phase B it processes
@@ -17,7 +21,7 @@ import (
 // This closes the reliability gap where payment success was only known client-side
 // (iOS PaymentSheet onCompletion) — the server now has an authoritative trigger for
 // order fulfillment. See docs/hicustom_integration_design.md §13.
-func NewPaymentsWebhookHandler(cfg *config.Config, fulfiller payments.Fulfiller) http.HandlerFunc {
+func NewPaymentsWebhookHandler(cfg *config.Config, db *gorm.DB, fulfiller payments.Fulfiller) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		EnableCors(&w)
 		if r.Method == http.MethodOptions {
@@ -57,6 +61,28 @@ func NewPaymentsWebhookHandler(cfg *config.Config, fulfiller payments.Fulfiller)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
+		var integrationEvent models.ShopIntegrationEvent
+		err = db.Where("provider = ? AND external_event_id = ?", "stripe", event.ID).First(&integrationEvent).Error
+		if err == nil && integrationEvent.Status == "completed" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if err != nil && err != gorm.ErrRecordNotFound {
+			http.Error(w, "event store unavailable", http.StatusInternalServerError)
+			return
+		}
+		if integrationEvent.ID == "" {
+			integrationEvent = models.ShopIntegrationEvent{
+				ID: uuid.NewString(), Provider: "stripe", ExternalEventID: event.ID,
+				Topic: string(event.Type), Status: "processing",
+			}
+			if err := db.Create(&integrationEvent).Error; err != nil {
+				http.Error(w, "event store unavailable", http.StatusInternalServerError)
+				return
+			}
+		} else {
+			_ = db.Model(&integrationEvent).Updates(map[string]any{"status": "processing", "last_error": ""}).Error
+		}
 
 		var pi stripe.PaymentIntent
 		if err := json.Unmarshal(event.Data.Raw, &pi); err != nil {
@@ -82,11 +108,14 @@ func NewPaymentsWebhookHandler(cfg *config.Config, fulfiller payments.Fulfiller)
 		// HiCustom branch makes a real (slow) API call, enqueue and return 200
 		// after enqueue — never block a webhook on a factory round-trip.
 		if err := fulfiller.Fulfill(req); err != nil {
+			_ = db.Model(&integrationEvent).Updates(map[string]any{"status": "failed", "last_error": err.Error()}).Error
 			log.Printf("[stripe-webhook] fulfillment failed for %s: %v", pi.ID, err)
 			// 500 → Stripe retries. We have not fulfilled, so retrying is correct.
 			http.Error(w, "fulfillment failed", http.StatusInternalServerError)
 			return
 		}
+		now := time.Now().UTC()
+		_ = db.Model(&integrationEvent).Updates(map[string]any{"status": "completed", "processed_at": &now, "last_error": ""}).Error
 
 		log.Printf("[stripe-webhook] payment_intent.succeeded handled: %s (%d item(s))", pi.ID, len(req.Items))
 		w.WriteHeader(http.StatusOK)

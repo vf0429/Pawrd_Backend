@@ -17,6 +17,7 @@ import (
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/merchant"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/payments"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/places"
+	"github.com/wangwuxing777/Pawrd_Backend/internal/services/shopify"
 )
 
 var port = "8000"
@@ -113,10 +114,6 @@ func main() {
 	merchantVaccinationClient := merchant.NewClient(cfg)
 	handlers.SetMirrorFreshnessWindow(bookingFreshnessWindowConfig())
 
-	// Order fulfillment dispatcher — routes paid orders to the correct pipeline
-	// (shopify now, hicustom reserved for Phase C). Driven by the Stripe webhook.
-	fulfiller := payments.NewDispatcher()
-
 	// Parse flags for seeding DB
 	seedDB := flag.Bool("seed", false, "Seed the database with initial scenario data")
 	flag.Parse()
@@ -131,6 +128,13 @@ func main() {
 	if err := models.InitAuthDB(); err != nil {
 		log.Fatalf("Fatal error initializing auth db: %v", err)
 	}
+	var shopifyAdmin shopify.AdminOrderClient
+	if adminClient, adminErr := shopify.NewAdminClient(cfg); adminErr == nil {
+		shopifyAdmin = adminClient
+	} else if !cfg.UseMockShopify {
+		log.Printf("Shopify Admin order operations unavailable: %v", adminErr)
+	}
+	fulfiller := payments.NewOrderDispatcher(db, shopifyAdmin)
 
 	if *seedDB {
 		SeedDatabase(db)
@@ -242,7 +246,12 @@ func main() {
 	mux.HandleFunc("/api/shop/categories", handlers.NewShopCategoriesHandler(cfg))
 	mux.HandleFunc("/api/shop/search", handlers.NewShopSearchHandler(cfg))
 	mux.HandleFunc("/api/shop/checkout/payment-sheet", handlers.NewShopPaymentSheetHandler(cfg, db))
-	mux.HandleFunc("/api/payments/webhook", handlers.NewPaymentsWebhookHandler(cfg, fulfiller))
+	mux.HandleFunc("/api/payments/webhook", handlers.NewPaymentsWebhookHandler(cfg, db, fulfiller))
+	mux.HandleFunc("/api/shop/webhooks/shopify", handlers.NewShopifyWebhookHandler(cfg, db))
+	mux.HandleFunc("/api/shop/orders", handlers.NewShopOrdersHandler(db))
+	mux.HandleFunc("/api/shop/orders/{orderID}", handlers.NewShopOrderDetailHandler(db, shopifyAdmin))
+	mux.HandleFunc("/api/shop/orders/{orderID}/received", handlers.NewShopOrderReceivedHandler(db, shopifyAdmin))
+	mux.HandleFunc("/api/shop/orders/{orderID}/return-request", handlers.NewShopOrderReturnHandler(db, shopifyAdmin))
 
 	// HiCustom (custom products) handlers — designer entry + design persistence.
 	mux.HandleFunc("/api/shop/hicustom/designer-url", handlers.NewHiCustomDesignerURLHandler(cfg))

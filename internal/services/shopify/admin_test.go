@@ -1,0 +1,184 @@
+package shopify
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func newTestAdminClient(server *httptest.Server, provider *adminTokenProvider) *AdminClient {
+	provider.endpoint = server.URL + "/admin/oauth/access_token"
+	provider.httpClient = server.Client()
+	if provider.now == nil {
+		provider.now = time.Now
+	}
+	return &AdminClient{
+		endpoint:      server.URL + "/admin/api/2026-07/graphql.json",
+		tokenProvider: provider,
+		httpClient:    server.Client(),
+	}
+}
+
+func executeTestQuery(t *testing.T, client *AdminClient) {
+	t.Helper()
+	var data struct {
+		Shop struct {
+			ID string `json:"id"`
+		} `json:"shop"`
+	}
+	if err := client.execute(context.Background(), "query { shop { id } }", nil, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Shop.ID != "gid://shopify/Shop/1" {
+		t.Fatalf("unexpected shop id %q", data.Shop.ID)
+	}
+}
+
+func TestAdminTokenProviderCachesAcrossConcurrentRequests(t *testing.T) {
+	var tokenCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/admin/oauth/access_token":
+			tokenCalls.Add(1)
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("parse token form: %v", err)
+			}
+			assertTokenForm(t, r.Form)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "dynamic-token",
+				"expires_in":   86399,
+			})
+		case "/admin/api/2026-07/graphql.json":
+			if got := r.Header.Get("X-Shopify-Access-Token"); got != "dynamic-token" {
+				t.Errorf("unexpected Admin token %q", got)
+			}
+			_, _ = w.Write([]byte(`{"data":{"shop":{"id":"gid://shopify/Shop/1"}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestAdminClient(server, &adminTokenProvider{
+		clientID: "client-id", clientSecret: "client-secret",
+	})
+	var wg sync.WaitGroup
+	for range 12 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			executeTestQuery(t, client)
+		}()
+	}
+	wg.Wait()
+	if got := tokenCalls.Load(); got != 1 {
+		t.Fatalf("expected one token exchange, got %d", got)
+	}
+}
+
+func TestAdminTokenProviderRefreshesBeforeExpiry(t *testing.T) {
+	var tokenCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/admin/oauth/access_token":
+			call := tokenCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "dynamic-token-" + string(rune('0'+call)),
+				"expires_in":   86399,
+			})
+		case "/admin/api/2026-07/graphql.json":
+			_, _ = w.Write([]byte(`{"data":{"shop":{"id":"gid://shopify/Shop/1"}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	provider := &adminTokenProvider{clientID: "client-id", clientSecret: "client-secret"}
+	client := newTestAdminClient(server, provider)
+	executeTestQuery(t, client)
+	provider.mu.Lock()
+	provider.refreshAt = time.Now().Add(-time.Minute)
+	provider.mu.Unlock()
+	executeTestQuery(t, client)
+	if got := tokenCalls.Load(); got != 2 {
+		t.Fatalf("expected token refresh, got %d exchanges", got)
+	}
+}
+
+func TestAdminClientRefreshesAndRetriesOnceAfterUnauthorized(t *testing.T) {
+	var tokenCalls atomic.Int32
+	var apiCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/admin/oauth/access_token":
+			call := tokenCalls.Add(1)
+			token := "expired-token"
+			if call > 1 {
+				token = "fresh-token"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": token,
+				"expires_in":   86399,
+			})
+		case "/admin/api/2026-07/graphql.json":
+			apiCalls.Add(1)
+			if r.Header.Get("X-Shopify-Access-Token") == "expired-token" {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			_, _ = w.Write([]byte(`{"data":{"shop":{"id":"gid://shopify/Shop/1"}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestAdminClient(server, &adminTokenProvider{
+		clientID: "client-id", clientSecret: "client-secret",
+	})
+	executeTestQuery(t, client)
+	if got := tokenCalls.Load(); got != 2 {
+		t.Fatalf("expected two token exchanges, got %d", got)
+	}
+	if got := apiCalls.Load(); got != 2 {
+		t.Fatalf("expected one API retry, got %d calls", got)
+	}
+}
+
+func TestAdminTokenProviderFallsBackToStaticToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/admin/oauth/access_token":
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+		case "/admin/api/2026-07/graphql.json":
+			if got := r.Header.Get("X-Shopify-Access-Token"); got != "cutover-token" {
+				t.Errorf("unexpected fallback token %q", got)
+			}
+			_, _ = w.Write([]byte(`{"data":{"shop":{"id":"gid://shopify/Shop/1"}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestAdminClient(server, &adminTokenProvider{
+		clientID: "client-id", clientSecret: "client-secret", staticToken: "cutover-token",
+	})
+	executeTestQuery(t, client)
+}
+
+func assertTokenForm(t *testing.T, form url.Values) {
+	t.Helper()
+	if form.Get("grant_type") != "client_credentials" ||
+		form.Get("client_id") != "client-id" ||
+		form.Get("client_secret") != "client-secret" {
+		t.Fatalf("unexpected token form: %#v", form)
+	}
+}

@@ -36,6 +36,11 @@ type Config struct {
 	ShopifyDomain                 string
 	ShopifyStorefrontPrivateToken string
 	ShopifyStorefrontToken        string
+	ShopifyAdminAccessToken       string
+	ShopifyClientID               string
+	ShopifyClientSecret           string
+	ShopifyAdminAPIVersion        string
+	ShopifyWebhookSecret          string
 	UseMockShopify                bool
 	HiCustomBaseURL               string
 	HiCustomAppKey                string
@@ -77,6 +82,11 @@ func LoadConfig() *Config {
 		ShopifyDomain:                 strings.TrimSpace(os.Getenv("SHOPIFY_DOMAIN")),
 		ShopifyStorefrontPrivateToken: strings.TrimSpace(os.Getenv("SHOPIFY_STOREFRONT_PRIVATE_TOKEN")),
 		ShopifyStorefrontToken:        strings.TrimSpace(os.Getenv("SHOPIFY_STOREFRONT_TOKEN")),
+		ShopifyAdminAccessToken:       strings.TrimSpace(os.Getenv("SHOPIFY_ADMIN_ACCESS_TOKEN")),
+		ShopifyClientID:               strings.TrimSpace(os.Getenv("SHOPIFY_CLIENT_ID")),
+		ShopifyClientSecret:           strings.TrimSpace(os.Getenv("SHOPIFY_CLIENT_SECRET")),
+		ShopifyAdminAPIVersion:        strings.TrimSpace(getEnvOrDefault("SHOPIFY_ADMIN_API_VERSION", "2026-07")),
+		ShopifyWebhookSecret:          strings.TrimSpace(os.Getenv("SHOPIFY_WEBHOOK_SECRET")),
 		UseMockShopify:                os.Getenv("USE_MOCK_SHOPIFY") == "true",
 		HiCustomBaseURL:               strings.TrimSpace(getEnvOrDefault("HICUSTOM_BASE_URL", "https://open.hicustom.com")),
 		HiCustomAppKey:                strings.TrimSpace(os.Getenv("HICUSTOM_APP_KEY")),
@@ -86,6 +96,24 @@ func LoadConfig() *Config {
 		StripePublishableKey:          strings.TrimSpace(os.Getenv("STRIPE_PUBLISHABLE_KEY")),
 		StripeWebhookSecret:           strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET")),
 	}
+}
+
+func (c *Config) ValidateShopifyAdminConfig() error {
+	if c.ShopifyDomain == "" {
+		return fmt.Errorf("SHOPIFY_DOMAIN environment variable is required")
+	}
+	hasClientID := c.ShopifyClientID != ""
+	hasClientSecret := c.ShopifyClientSecret != ""
+	if hasClientID != hasClientSecret {
+		return fmt.Errorf("SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET must be configured together")
+	}
+	if !hasClientID && c.ShopifyAdminAccessToken == "" {
+		return fmt.Errorf("Shopify Admin credentials are required: configure SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET, or legacy SHOPIFY_ADMIN_ACCESS_TOKEN")
+	}
+	if c.ShopifyAdminAPIVersion == "" {
+		return fmt.Errorf("SHOPIFY_ADMIN_API_VERSION environment variable is required")
+	}
+	return nil
 }
 
 // ValidateShopifyConfig checks if Shopify configuration is properly set
