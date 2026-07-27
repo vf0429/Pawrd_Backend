@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -131,6 +132,18 @@ func main() {
 	var shopifyAdmin shopify.AdminOrderClient
 	if adminClient, adminErr := shopify.NewAdminClient(cfg); adminErr == nil {
 		shopifyAdmin = adminClient
+		if cfg.ShopifyWebhookCallbackURL != "" {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+				created, err := adminClient.EnsureWebhookSubscriptions(ctx, cfg.ShopifyWebhookCallbackURL)
+				if err != nil {
+					log.Printf("Shopify webhook subscription sync failed: %v", err)
+					return
+				}
+				log.Printf("Shopify webhook subscriptions ready: %d created", created)
+			}()
+		}
 	} else if !cfg.UseMockShopify {
 		log.Printf("Shopify Admin order operations unavailable: %v", adminErr)
 	}

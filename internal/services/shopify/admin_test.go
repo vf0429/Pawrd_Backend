@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -172,6 +174,68 @@ func TestAdminTokenProviderFallsBackToStaticToken(t *testing.T) {
 		clientID: "client-id", clientSecret: "client-secret", staticToken: "cutover-token",
 	})
 	executeTestQuery(t, client)
+}
+
+func TestEnsureWebhookSubscriptionsCreatesOnlyMissingForCallback(t *testing.T) {
+	const callbackURL = "https://api.pawrd.top/api/shop/webhooks/shopify"
+	var createdTopics []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Shopify-Access-Token"); got != "static-token" {
+			t.Errorf("unexpected Admin token %q", got)
+		}
+		var request struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode GraphQL request: %v", err)
+			return
+		}
+		switch {
+		case strings.Contains(request.Query, "PawrdWebhookSubscriptions"):
+			_, _ = w.Write([]byte(`{"data":{"webhookSubscriptions":{"nodes":[
+				{"topic":"FULFILLMENTS_CREATE","uri":"https://api.pawrd.top/api/shop/webhooks/shopify"},
+				{"topic":"RETURNS_REQUEST","uri":"https://old.example.com/webhook"}
+			]}}}`))
+		case strings.Contains(request.Query, "CreatePawrdWebhook"):
+			topic, _ := request.Variables["topic"].(string)
+			createdTopics = append(createdTopics, topic)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"webhookSubscriptionCreate": map[string]any{
+						"webhookSubscription": map[string]any{
+							"id": "gid://shopify/WebhookSubscription/" + topic, "topic": topic, "uri": callbackURL,
+						},
+						"userErrors": []any{},
+					},
+				},
+			})
+		default:
+			t.Errorf("unexpected GraphQL query: %s", request.Query)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestAdminClient(server, &adminTokenProvider{staticToken: "static-token"})
+	created, err := client.ensureWebhookSubscriptions(context.Background(), callbackURL, []string{
+		"FULFILLMENTS_CREATE", "RETURNS_REQUEST", "REFUNDS_CREATE",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created != 2 {
+		t.Fatalf("expected two subscriptions to be created, got %d", created)
+	}
+	if !slices.Equal(createdTopics, []string{"RETURNS_REQUEST", "REFUNDS_CREATE"}) {
+		t.Fatalf("unexpected created topics: %#v", createdTopics)
+	}
+}
+
+func TestEnsureWebhookSubscriptionsRequiresHTTPSCallback(t *testing.T) {
+	client := &AdminClient{}
+	if _, err := client.ensureWebhookSubscriptions(context.Background(), "http://example.com/webhook", nil); err == nil {
+		t.Fatal("expected non-HTTPS callback to be rejected")
+	}
 }
 
 func assertTokenForm(t *testing.T, form url.Values) {

@@ -41,6 +41,7 @@ type Config struct {
 	ShopifyClientSecret           string
 	ShopifyAdminAPIVersion        string
 	ShopifyWebhookSecret          string
+	ShopifyWebhookCallbackURL     string
 	UseMockShopify                bool
 	HiCustomBaseURL               string
 	HiCustomAppKey                string
@@ -87,6 +88,7 @@ func LoadConfig() *Config {
 		ShopifyClientSecret:           strings.TrimSpace(os.Getenv("SHOPIFY_CLIENT_SECRET")),
 		ShopifyAdminAPIVersion:        strings.TrimSpace(getEnvOrDefault("SHOPIFY_ADMIN_API_VERSION", "2026-07")),
 		ShopifyWebhookSecret:          strings.TrimSpace(os.Getenv("SHOPIFY_WEBHOOK_SECRET")),
+		ShopifyWebhookCallbackURL:     strings.TrimSpace(os.Getenv("SHOPIFY_WEBHOOK_CALLBACK_URL")),
 		UseMockShopify:                os.Getenv("USE_MOCK_SHOPIFY") == "true",
 		HiCustomBaseURL:               strings.TrimSpace(getEnvOrDefault("HICUSTOM_BASE_URL", "https://open.hicustom.com")),
 		HiCustomAppKey:                strings.TrimSpace(os.Getenv("HICUSTOM_APP_KEY")),

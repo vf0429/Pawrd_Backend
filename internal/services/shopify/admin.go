@@ -63,6 +63,21 @@ type AdminOrderClient interface {
 	RequestReturn(context.Context, string, string, string) (*AdminReturnResult, error)
 }
 
+var requiredWebhookTopics = []string{
+	"FULFILLMENTS_CREATE",
+	"FULFILLMENTS_UPDATE",
+	"ORDERS_FULFILLED",
+	"RETURNS_REQUEST",
+	"RETURNS_APPROVE",
+	"RETURNS_DECLINE",
+	"RETURNS_CANCEL",
+	"RETURNS_CLOSE",
+	"RETURNS_REOPEN",
+	"RETURNS_PROCESS",
+	"RETURNS_UPDATE",
+	"REFUNDS_CREATE",
+}
+
 type AdminClient struct {
 	endpoint      string
 	tokenProvider *adminTokenProvider
@@ -235,6 +250,88 @@ func (p *adminTokenProvider) fetch(ctx context.Context) (string, int64, error) {
 		return "", 0, fmt.Errorf("Shopify Admin token response is missing access_token or expires_in")
 	}
 	return strings.TrimSpace(payload.AccessToken), payload.ExpiresIn, nil
+}
+
+// EnsureWebhookSubscriptions creates only the missing shop-specific HTTPS
+// subscriptions for Pawrd's order lifecycle. Existing subscriptions using the
+// same callback URL are preserved, and subscriptions using other URLs are not
+// changed.
+func (c *AdminClient) EnsureWebhookSubscriptions(ctx context.Context, callbackURL string) (int, error) {
+	return c.ensureWebhookSubscriptions(ctx, callbackURL, requiredWebhookTopics)
+}
+
+func (c *AdminClient) ensureWebhookSubscriptions(ctx context.Context, callbackURL string, topics []string) (int, error) {
+	callbackURL = strings.TrimSpace(callbackURL)
+	parsed, err := url.ParseRequestURI(callbackURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return 0, fmt.Errorf("Shopify webhook callback URL must be a valid HTTPS URL")
+	}
+
+	const subscriptionsQuery = `query PawrdWebhookSubscriptions {
+	  webhookSubscriptions(first: 250) {
+	    nodes { topic uri }
+	  }
+	}`
+	var existingData struct {
+		WebhookSubscriptions struct {
+			Nodes []struct {
+				Topic string `json:"topic"`
+				URI   string `json:"uri"`
+			} `json:"nodes"`
+		} `json:"webhookSubscriptions"`
+	}
+	if err := c.execute(ctx, subscriptionsQuery, nil, &existingData); err != nil {
+		return 0, fmt.Errorf("list Shopify webhook subscriptions: %w", err)
+	}
+
+	existing := make(map[string]bool, len(existingData.WebhookSubscriptions.Nodes))
+	for _, subscription := range existingData.WebhookSubscriptions.Nodes {
+		if strings.EqualFold(strings.TrimSpace(subscription.URI), callbackURL) {
+			existing[strings.ToUpper(strings.TrimSpace(subscription.Topic))] = true
+		}
+	}
+
+	const createMutation = `mutation CreatePawrdWebhook($topic: WebhookSubscriptionTopic!, $subscription: WebhookSubscriptionInput!) {
+	  webhookSubscriptionCreate(topic: $topic, webhookSubscription: $subscription) {
+	    webhookSubscription { id topic uri }
+	    userErrors { field message }
+	  }
+	}`
+	created := 0
+	for _, topic := range topics {
+		topic = strings.ToUpper(strings.TrimSpace(topic))
+		if topic == "" || existing[topic] {
+			continue
+		}
+		var createData struct {
+			WebhookSubscriptionCreate struct {
+				WebhookSubscription *struct {
+					ID    string `json:"id"`
+					Topic string `json:"topic"`
+					URI   string `json:"uri"`
+				} `json:"webhookSubscription"`
+				UserErrors []struct {
+					Message string `json:"message"`
+				} `json:"userErrors"`
+			} `json:"webhookSubscriptionCreate"`
+		}
+		variables := map[string]any{
+			"topic":        topic,
+			"subscription": map[string]any{"uri": callbackURL},
+		}
+		if err := c.execute(ctx, createMutation, variables, &createData); err != nil {
+			return created, fmt.Errorf("create Shopify webhook %s: %w", topic, err)
+		}
+		if len(createData.WebhookSubscriptionCreate.UserErrors) > 0 {
+			return created, fmt.Errorf("create Shopify webhook %s: %s", topic, createData.WebhookSubscriptionCreate.UserErrors[0].Message)
+		}
+		if createData.WebhookSubscriptionCreate.WebhookSubscription == nil {
+			return created, fmt.Errorf("create Shopify webhook %s returned no subscription", topic)
+		}
+		existing[topic] = true
+		created++
+	}
+	return created, nil
 }
 
 func (c *AdminClient) CreateOrder(ctx context.Context, input AdminOrderInput) (*AdminOrderResult, error) {
