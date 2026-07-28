@@ -340,11 +340,12 @@ func (c *AdminClient) CreateOrder(ctx context.Context, input AdminOrderInput) (*
 		lines = append(lines, map[string]any{"variantId": line.VariantID, "quantity": line.Quantity})
 	}
 	order := map[string]any{
-		"currency":        strings.ToUpper(input.Currency),
-		"email":           input.CustomerEmail,
-		"phone":           input.CustomerPhone,
-		"financialStatus": "PAID",
-		"lineItems":       lines,
+		"currency":         strings.ToUpper(input.Currency),
+		"email":            input.CustomerEmail,
+		"phone":            input.CustomerPhone,
+		"financialStatus":  "PAID",
+		"lineItems":        lines,
+		"sourceIdentifier": input.PaymentID,
 		"shippingAddress": map[string]any{
 			"firstName":   input.ShippingName,
 			"phone":       input.ShippingPhone,
@@ -353,7 +354,7 @@ func (c *AdminClient) CreateOrder(ctx context.Context, input AdminOrderInput) (*
 			"province":    input.ShippingRegion,
 			"countryCode": "HK",
 		},
-		"tags": []string{"Pawrd", "Stripe payment: " + input.PaymentID},
+		"tags": []string{"Pawrd", "Stripe"},
 		"transactions": []map[string]any{{
 			"amountSet": map[string]any{"shopMoney": map[string]any{"amount": input.Amount, "currencyCode": strings.ToUpper(input.Currency)}},
 			"gateway":   "Stripe", "kind": "SALE", "status": "SUCCESS",

@@ -176,6 +176,52 @@ func TestAdminTokenProviderFallsBackToStaticToken(t *testing.T) {
 	executeTestQuery(t, client)
 }
 
+func TestCreateOrderUsesSafeTagsAndSourceIdentifier(t *testing.T) {
+	const paymentIntentID = "pi_3TxoaXCtgcSY1r8p1zCPKqtT"
+	var orderVariables map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode GraphQL request: %v", err)
+			return
+		}
+		orderVariables, _ = request.Variables["order"].(map[string]any)
+		_, _ = w.Write([]byte(`{"data":{"orderCreate":{"order":{
+			"id":"gid://shopify/Order/1",
+			"legacyResourceId":"1",
+			"name":"#1001",
+			"lineItems":{"nodes":[{"id":"gid://shopify/LineItem/1"}]}
+		},"userErrors":[]}}}`))
+	}))
+	defer server.Close()
+
+	client := newTestAdminClient(server, &adminTokenProvider{staticToken: "static-token"})
+	_, err := client.CreateOrder(context.Background(), AdminOrderInput{
+		Currency:  "HKD",
+		Amount:    "25.02",
+		PaymentID: paymentIntentID,
+		Lines: []AdminOrderLineInput{{
+			VariantID: "gid://shopify/ProductVariant/1",
+			Quantity:  1,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if orderVariables["sourceIdentifier"] != paymentIntentID {
+		t.Fatalf("unexpected source identifier: %#v", orderVariables["sourceIdentifier"])
+	}
+	tags, ok := orderVariables["tags"].([]any)
+	if !ok {
+		t.Fatalf("unexpected tags payload: %#v", orderVariables["tags"])
+	}
+	if !slices.Equal(tags, []any{"Pawrd", "Stripe"}) {
+		t.Fatalf("unexpected tags: %#v", tags)
+	}
+}
+
 func TestEnsureWebhookSubscriptionsCreatesOnlyMissingForCallback(t *testing.T) {
 	const callbackURL = "https://api.pawrd.top/api/shop/webhooks/shopify"
 	var createdTopics []string
