@@ -91,6 +91,14 @@ func TestStorefrontQuoteCreatesCartAndSelectsAuthoritativeDelivery(t *testing.T)
 		selectableAddress["validationStrategy"] != "STRICT" {
 		t.Fatalf("address must use strict one-time validation: %#v", addresses[0])
 	}
+	addressWrapper, ok := selectableAddress["address"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing Shopify address wrapper: %#v", selectableAddress)
+	}
+	deliveryAddress, ok := addressWrapper["deliveryAddress"].(map[string]any)
+	if !ok || deliveryAddress["countryCode"] != "HK" || deliveryAddress["zoneCode"] != "HK" {
+		t.Fatalf("missing Hong Kong country/zone codes: %#v", addressWrapper["deliveryAddress"])
+	}
 
 	finalQuote, err := client.SelectCartDelivery(
 		context.Background(),
@@ -112,6 +120,29 @@ func TestStorefrontQuoteCreatesCartAndSelectsAuthoritativeDelivery(t *testing.T)
 	}
 	if selectedVariables["cartId"] != "gid://shopify/Cart/cart-1" {
 		t.Fatalf("unexpected selected cart ID: %#v", selectedVariables)
+	}
+}
+
+func TestHongKongZoneCode(t *testing.T) {
+	for _, test := range []struct {
+		region string
+		want   string
+	}{
+		{region: "Hong Kong Island", want: "HK"},
+		{region: "Kowloon", want: "KLN"},
+		{region: "New Territories", want: "NT"},
+		{region: "港島", want: "HK"},
+		{region: "九龍", want: "KLN"},
+		{region: "新界", want: "NT"},
+	} {
+		t.Run(test.region, func(t *testing.T) {
+			if got, err := hongKongZoneCode(test.region); err != nil || got != test.want {
+				t.Fatalf("hongKongZoneCode(%q) = %q, %v; want %q", test.region, got, err, test.want)
+			}
+		})
+	}
+	if _, err := hongKongZoneCode("Hong Kong"); err == nil {
+		t.Fatal("generic Hong Kong region must fail closed")
 	}
 }
 

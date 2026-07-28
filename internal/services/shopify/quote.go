@@ -97,6 +97,10 @@ func (c *Client) CreateCartQuote(ctx context.Context, req StorefrontQuoteRequest
 			"quantity":      line.Quantity,
 		})
 	}
+	zoneCode, err := hongKongZoneCode(req.Shipping.Region)
+	if err != nil {
+		return nil, err
+	}
 	firstName, lastName := splitShippingName(req.Shipping.RecipientName)
 	address := map[string]any{
 		"address": map[string]any{
@@ -108,6 +112,7 @@ func (c *Client) CreateCartQuote(ctx context.Context, req StorefrontQuoteRequest
 				"address2":    strings.TrimSpace(req.Shipping.Region),
 				"city":        strings.TrimSpace(req.Shipping.District),
 				"countryCode": "HK",
+				"zoneCode":    zoneCode,
 			},
 		},
 		"oneTimeUse":         true,
@@ -239,6 +244,19 @@ func (c *Client) SelectCartDelivery(
 		return nil, fmt.Errorf("decode Shopify selected delivery quote: %w", err)
 	}
 	return normalizeQuoteMutation(payload.Update, "")
+}
+
+func hongKongZoneCode(region string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(region)) {
+	case "hong kong island", "hk", "港島", "香港島":
+		return "HK", nil
+	case "kowloon", "kln", "九龍":
+		return "KLN", nil
+	case "new territories", "nt", "新界":
+		return "NT", nil
+	default:
+		return "", fmt.Errorf("unsupported Hong Kong shipping region %q", strings.TrimSpace(region))
+	}
 }
 
 const storefrontQuoteCartFragment = `
