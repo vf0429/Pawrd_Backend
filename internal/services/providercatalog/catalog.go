@@ -26,6 +26,11 @@ var knownDefinitions = []definition{
 		Aliases: []string{"bluecross", "blue_cross", "blue cross", "藍十字"},
 	},
 	{
+		ID:      "MSIG",
+		Name:    "MSIG",
+		Aliases: []string{"msig"},
+	},
+	{
 		ID:      "one_degree",
 		Name:    "OneDegree",
 		Aliases: []string{"one_degree", "onedegree", "one degree"},
@@ -34,11 +39,6 @@ var knownDefinitions = []definition{
 		ID:      "prudential",
 		Name:    "Prudential 保誠",
 		Aliases: []string{"prudential", "保誠", "pruchoice"},
-	},
-	{
-		ID:      "bolttech",
-		Name:    "Bolttech",
-		Aliases: []string{"bolttech"},
 	},
 }
 
@@ -149,8 +149,20 @@ func discoverProviders(dataPath string) map[string]bool {
 			continue
 		}
 		providerID := filepath.Base(entry.Name())
+		if !isKnownProvider(providerID) {
+			continue
+		}
 		found[providerID] = true
 	}
 
 	return found
+}
+
+func isKnownProvider(providerID string) bool {
+	for _, provider := range knownDefinitions {
+		if provider.ID == providerID {
+			return true
+		}
+	}
+	return false
 }

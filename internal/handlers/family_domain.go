@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -114,20 +115,20 @@ func loadFamilyProfile(db *gorm.DB, idOrHandle string, viewerUserID string) (fam
 }
 
 type petProfilePayload struct {
-	ID                string            `json:"id"`
-	FamilyID          string            `json:"family_id"`
-	FamilyDisplayName string            `json:"family_display_name"`
-	FamilyHandle      string            `json:"family_handle"`
-	ViewerCanFollowFamily bool          `json:"viewer_can_follow_family"`
-	DisplayName       string            `json:"display_name"`
-	PublicSlug        string            `json:"public_slug"`
-	AvatarURL         string            `json:"avatar_url,omitempty"`
-	Species           string            `json:"species"`
-	Breed             string            `json:"breed,omitempty"`
-	Headline          string            `json:"headline,omitempty"`
-	Bio               string            `json:"bio,omitempty"`
-	DerivedSummary    map[string]any    `json:"derived_summary"`
-	Visibility        map[string]bool   `json:"visibility"`
+	ID                    string          `json:"id"`
+	FamilyID              string          `json:"family_id"`
+	FamilyDisplayName     string          `json:"family_display_name"`
+	FamilyHandle          string          `json:"family_handle"`
+	ViewerCanFollowFamily bool            `json:"viewer_can_follow_family"`
+	DisplayName           string          `json:"display_name"`
+	PublicSlug            string          `json:"public_slug"`
+	AvatarURL             string          `json:"avatar_url,omitempty"`
+	Species               string          `json:"species"`
+	Breed                 string          `json:"breed,omitempty"`
+	Headline              string          `json:"headline,omitempty"`
+	Bio                   string          `json:"bio,omitempty"`
+	DerivedSummary        map[string]any  `json:"derived_summary"`
+	Visibility            map[string]bool `json:"visibility"`
 }
 
 func NewFamilyProfileHandler(db *gorm.DB) http.HandlerFunc {
@@ -196,6 +197,128 @@ func NewFamilyProfileByOwnerHandler(db *gorm.DB) http.HandlerFunc {
 	}
 }
 
+type updateFamilyRequest struct {
+	DisplayName string `json:"display_name"`
+	Handle      string `json:"handle"`
+	AvatarURL   string `json:"avatar_url"`
+	Bio         string `json:"bio"`
+	City        string `json:"city"`
+}
+
+// NewFamilyProfileMeHandler handles GET / PUT / POST /api/domain/families/me
+// for the currently authenticated user (identified by X-User-Id).
+func NewFamilyProfileMeHandler(db *gorm.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		EnableCors(&w)
+		if r.Method == http.MethodOptions {
+			return
+		}
+
+		userID := strings.TrimSpace(r.Header.Get("X-User-Id"))
+		if userID == "" {
+			http.Error(w, "X-User-Id header required", http.StatusUnauthorized)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet:
+			var family models.Family
+			if err := db.Where("owner_user_id = ?", userID).First(&family).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					http.Error(w, "family not found", http.StatusNotFound)
+					return
+				}
+				http.Error(w, "failed to load family: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			payload, status, err := loadFamilyProfile(db, family.ID, userID)
+			if err != nil {
+				http.Error(w, "failed to load family: "+err.Error(), status)
+				return
+			}
+			writeJSON(w, http.StatusOK, payload)
+
+		case http.MethodPost, http.MethodPut:
+			var req updateFamilyRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeAuthError(w, http.StatusBadRequest, "Invalid request body")
+				return
+			}
+
+			req.DisplayName = strings.TrimSpace(req.DisplayName)
+			req.Handle = strings.TrimSpace(strings.ToLower(req.Handle))
+			req.Bio = strings.TrimSpace(req.Bio)
+			req.City = strings.TrimSpace(req.City)
+
+			var family models.Family
+			err := db.Where("owner_user_id = ?", userID).First(&family).Error
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				http.Error(w, "failed to load family: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				if req.DisplayName == "" || req.Handle == "" {
+					writeAuthError(w, http.StatusBadRequest, "display_name and handle are required")
+					return
+				}
+				family = models.Family{
+					OwnerUserID: userID,
+					DisplayName: req.DisplayName,
+					Handle:      req.Handle,
+					AvatarURL:   req.AvatarURL,
+					Bio:         req.Bio,
+					City:        req.City,
+					IsPublic:    true,
+				}
+				if err := db.Create(&family).Error; err != nil {
+					http.Error(w, "failed to create family: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				member := models.FamilyMember{
+					FamilyID:     family.ID,
+					UserID:       userID,
+					DisplayName:  req.DisplayName,
+					Role:         "owner",
+					Relationship: "Parent",
+					IsPrimary:    true,
+				}
+				_ = db.Create(&member).Error
+			} else {
+				if req.DisplayName != "" {
+					family.DisplayName = req.DisplayName
+				}
+				if req.Handle != "" && req.Handle != family.Handle {
+					var count int64
+					_ = db.Model(&models.Family{}).Where("handle = ? AND id != ?", req.Handle, family.ID).Count(&count).Error
+					if count > 0 {
+						writeAuthError(w, http.StatusConflict, "Handle already taken")
+						return
+					}
+					family.Handle = req.Handle
+				}
+				family.AvatarURL = req.AvatarURL
+				family.Bio = req.Bio
+				family.City = req.City
+				if err := db.Save(&family).Error; err != nil {
+					http.Error(w, "failed to update family: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+
+			payload, status, err := loadFamilyProfile(db, family.ID, userID)
+			if err != nil {
+				http.Error(w, "failed to load family: "+err.Error(), status)
+				return
+			}
+			writeJSON(w, http.StatusOK, payload)
+
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}
+}
+
 func NewPetProfileHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		EnableCors(&w)
@@ -247,18 +370,18 @@ func NewPetProfileHandler(db *gorm.DB) http.HandlerFunc {
 		}
 
 		payload := petProfilePayload{
-			ID:                pet.ID,
-			FamilyID:          family.ID,
-			FamilyDisplayName: family.DisplayName,
-			FamilyHandle:      family.Handle,
+			ID:                    pet.ID,
+			FamilyID:              family.ID,
+			FamilyDisplayName:     family.DisplayName,
+			FamilyHandle:          family.Handle,
 			ViewerCanFollowFamily: strings.TrimSpace(r.Header.Get("X-User-Id")) != "" && strings.TrimSpace(r.Header.Get("X-User-Id")) != family.OwnerUserID,
-			DisplayName:       public.DisplayName,
-			PublicSlug:        public.Slug,
-			AvatarURL:         public.AvatarURL,
-			Species:           pet.Species,
-			Headline:          public.Headline,
-			Bio:               public.Bio,
-			DerivedSummary:    derived,
+			DisplayName:           public.DisplayName,
+			PublicSlug:            public.Slug,
+			AvatarURL:             public.AvatarURL,
+			Species:               pet.Species,
+			Headline:              public.Headline,
+			Bio:                   public.Bio,
+			DerivedSummary:        derived,
 			Visibility: map[string]bool{
 				"show_breed":          pet.VisibilitySettings.ShowBreed,
 				"show_age":            pet.VisibilitySettings.ShowAge,

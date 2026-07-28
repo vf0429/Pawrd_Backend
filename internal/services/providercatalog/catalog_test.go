@@ -10,9 +10,9 @@ func TestDetectProvider(t *testing.T) {
 	tests := map[string]string{
 		"Blue Cross waiting period": "bluecross",
 		"藍十字 幾耐生效":                  "bluecross",
+		"MSIG waiting period":       "MSIG",
 		"onedegree coverage":        "one_degree",
 		"保誠 claims":                 "prudential",
-		"bolttech exclusions":       "bolttech",
 		"unknown provider":          "",
 	}
 
@@ -24,9 +24,9 @@ func TestDetectProvider(t *testing.T) {
 }
 
 func TestDetectProviders(t *testing.T) {
-	got := DetectProviders("比較 OneDegree、Blue Cross 同 Prudential 嘅受傷等候期")
-	if len(got) != 3 {
-		t.Fatalf("expected 3 providers, got %#v", got)
+	got := DetectProviders("比較 OneDegree、Blue Cross、MSIG 同 Prudential 嘅受傷等候期")
+	if len(got) != 4 {
+		t.Fatalf("expected 4 providers, got %#v", got)
 	}
 }
 
@@ -34,12 +34,13 @@ func TestNormalizeProviderID(t *testing.T) {
 	tests := map[string]string{
 		"blue cross":    "bluecross",
 		"藍十字":           "bluecross",
+		"MSIG":          "MSIG",
 		"one_degree":    "one_degree",
 		"onedegree":     "one_degree",
 		"保誠":            "prudential",
 		"all":           "",
 		"all providers": "",
-		" MSIG ":        "msig",
+		" bolttech ":    "bolttech",
 	}
 
 	for raw, want := range tests {
@@ -51,7 +52,7 @@ func TestNormalizeProviderID(t *testing.T) {
 
 func TestBuildProviderListIncludesKnownAndDiscoveredProviders(t *testing.T) {
 	root := t.TempDir()
-	for _, name := range []string{"bluecross", "MSIG"} {
+	for _, name := range []string{"bluecross", "MSIG", "bolttech"} {
 		if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", name, err)
 		}
@@ -63,11 +64,8 @@ func TestBuildProviderListIncludesKnownAndDiscoveredProviders(t *testing.T) {
 		providerMap[provider.ID] = provider
 	}
 
-	if _, ok := providerMap["bolttech"]; !ok {
-		t.Fatal("expected known provider bolttech to be present")
-	}
-	if providerMap["bolttech"].HasData {
-		t.Fatal("expected bolttech to have no data in temp corpus")
+	if _, ok := providerMap["prudential"]; !ok {
+		t.Fatal("expected known provider prudential to be present")
 	}
 	if !providerMap["bluecross"].HasData {
 		t.Fatal("expected bluecross to be marked as having data")
@@ -80,5 +78,8 @@ func TestBuildProviderListIncludesKnownAndDiscoveredProviders(t *testing.T) {
 	}
 	if providerMap["MSIG"].Name != "MSIG" {
 		t.Fatalf("unexpected display name for MSIG: %q", providerMap["MSIG"].Name)
+	}
+	if _, ok := providerMap["bolttech"]; ok {
+		t.Fatal("did not expect on-hold bolttech to be included in provider list")
 	}
 }

@@ -108,11 +108,13 @@ func newGoRAGClient(cfg *config.Config) *goRAGClient {
 }
 
 type legacyChatRequest struct {
-	Query     string `json:"query"`
-	SessionID string `json:"session_id"`
-	Model     string `json:"model"`
-	Provider  string `json:"provider"`
-	Tool      string `json:"tool"`
+	Query             string   `json:"query"`
+	SessionID         string   `json:"session_id"`
+	Model             string   `json:"model"`
+	Provider          string   `json:"provider"`
+	ProviderScope     string   `json:"provider_scope"`
+	SelectedProviders []string `json:"selected_providers"`
+	Tool              string   `json:"tool"`
 }
 
 type legacyProviderSelectionRequest struct {
@@ -149,6 +151,11 @@ type goQueryResponse struct {
 type errorResponse struct {
 	Detail string `json:"detail"`
 }
+
+const (
+	providerScopeAll      = "all"
+	providerScopeSelected = "selected"
+)
 
 func NewChatSessionHandler(store *chatSessionStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -237,21 +244,44 @@ func NewChatProxyHandler(cfg *config.Config, store *chatSessionStore) http.Handl
 			return
 		}
 
+		selectedProviders, err := normalizeSelectedProviders(req.SelectedProviders)
+		if err != nil {
+			writeChatJSON(w, http.StatusBadRequest, errorResponse{Detail: err.Error()})
+			return
+		}
+
+		providerScope, err := normalizeProviderScope(req.ProviderScope, selectedProviders)
+		if err != nil {
+			writeChatJSON(w, http.StatusBadRequest, errorResponse{Detail: err.Error()})
+			return
+		}
+
 		provider := strings.TrimSpace(req.Provider)
-		if provider == "" && strings.TrimSpace(req.SessionID) != "" {
+		if provider != "" {
+			provider, err = raggo.ValidateProvider(provider)
+			if err != nil {
+				writeChatJSON(w, http.StatusBadRequest, errorResponse{Detail: err.Error()})
+				return
+			}
+		}
+		if provider == "" && len(selectedProviders) == 1 && providerScope == providerScopeSelected {
+			provider = selectedProviders[0]
+		}
+		if provider == "" && strings.TrimSpace(req.SessionID) != "" && providerScope != providerScopeSelected {
 			provider = store.provider(strings.TrimSpace(req.SessionID))
 		}
 
+		query := buildEffectiveInsuranceQuery(req.Query, providerScope, selectedProviders)
+
 		var answer string
 		var sources []string
-		var err error
 		if runtimeName == "go" {
-			answer, sources, err = goClient.queryInsurance(req.Query, provider)
+			answer, sources, err = goClient.queryInsurance(query, provider)
 		} else {
-			answer, sources, err = pythonClient.queryInsurance(req.Query, provider)
+			answer, sources, err = pythonClient.queryInsurance(query, provider)
 			if err != nil && strings.Contains(strings.ToLower(err.Error()), "service unavailable") {
 				// Automatic fallback: keep /api/chat alive even if Python sidecar is down.
-				answer, sources, err = goClient.queryInsurance(req.Query, provider)
+				answer, sources, err = goClient.queryInsurance(query, provider)
 			}
 		}
 		if err != nil {
@@ -457,4 +487,77 @@ func writeChatJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func normalizeSelectedProviders(raw []string) ([]string, error) {
+	normalized := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, item := range raw {
+		value, err := raggo.ValidateProvider(item)
+		if err != nil {
+			return nil, err
+		}
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+	return normalized, nil
+}
+
+func normalizeProviderScope(raw string, selectedProviders []string) (string, error) {
+	scope := strings.ToLower(strings.TrimSpace(raw))
+	if scope == "" {
+		if len(selectedProviders) > 0 {
+			return providerScopeSelected, nil
+		}
+		return providerScopeAll, nil
+	}
+	switch scope {
+	case providerScopeAll:
+		return providerScopeAll, nil
+	case providerScopeSelected:
+		if len(selectedProviders) == 0 {
+			return "", errors.New("selected_providers is required when provider_scope is selected")
+		}
+		return providerScopeSelected, nil
+	default:
+		return "", errors.New("provider_scope must be one of: all, selected")
+	}
+}
+
+func buildEffectiveInsuranceQuery(query, providerScope string, selectedProviders []string) string {
+	trimmed := strings.TrimSpace(query)
+	if providerScope != providerScopeSelected || len(selectedProviders) == 0 {
+		return trimmed
+	}
+
+	displayNames := make([]string, 0, len(selectedProviders))
+	for _, provider := range selectedProviders {
+		displayNames = append(displayNames, providerDisplayName(provider))
+	}
+	contextLine := "Selected providers: " + strings.Join(displayNames, ", ")
+	if trimmed == "" {
+		return contextLine
+	}
+	return contextLine + "\n\nUser question: " + trimmed
+}
+
+func providerDisplayName(provider string) string {
+	switch provider {
+	case "bluecross":
+		return "Blue Cross"
+	case "one_degree":
+		return "One Degree"
+	case "prudential":
+		return "Prudential"
+	case "msig":
+		return "MSIG"
+	default:
+		return provider
+	}
 }

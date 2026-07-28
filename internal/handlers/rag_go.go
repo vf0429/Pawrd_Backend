@@ -104,17 +104,30 @@ func NewGoRAGHealthzHandler() http.HandlerFunc {
 }
 
 func NewGoRAGReadyzHandler() http.HandlerFunc {
+	cfg := raggo.LoadConfig()
 	return func(w http.ResponseWriter, r *http.Request) {
 		EnableCors(&w)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		respondGoRAGJSON(w, http.StatusOK, map[string]any{
-			"ok":             true,
-			"service":        "go_rag_translation_skeleton",
-			"runtime":        "ready",
-			"implementation": "go",
+		report := raggo.BuildReadinessReport(cfg)
+		status := http.StatusOK
+		runtime := "ready"
+		if !report.OK {
+			status = http.StatusServiceUnavailable
+			runtime = "degraded"
+		}
+		respondGoRAGJSON(w, status, map[string]any{
+			"ok":               report.OK,
+			"service":          "go_rag_translation_skeleton",
+			"runtime":          runtime,
+			"implementation":   "go",
+			"llm_configured":   report.LLMConfigured,
+			"data_path":        report.DataPath,
+			"corpus_available": report.CorpusAvailable,
+			"chunk_count":      report.ChunkCount,
+			"issues":           report.Issues,
 		})
 	}
 }

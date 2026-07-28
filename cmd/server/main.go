@@ -196,6 +196,7 @@ func main() {
 	mux.HandleFunc("/users/{id}/following-detail", handlers.NewUserFollowingDetailHandler(db))
 	mux.HandleFunc("/users/{id}/followers-detail", handlers.NewUserFollowersDetailHandler(db))
 	mux.HandleFunc("/users/{id}/stats", handlers.NewUserStatsHandler(db))
+	mux.HandleFunc("/api/domain/families/me", handlers.NewFamilyProfileMeHandler(db))
 	mux.HandleFunc("/api/domain/families/{idOrHandle}", handlers.NewFamilyProfileHandler(db))
 	mux.HandleFunc("/api/domain/families/{idOrHandle}/follow", handlers.NewFamilyFollowHandler(db))
 	mux.HandleFunc("/api/domain/families/{idOrHandle}/followers-detail", handlers.NewFamilyFollowersDetailHandler(db))
@@ -217,14 +218,17 @@ func main() {
 	EnsureDomainSeedData(db)
 
 	// Auth endpoints
-	mux.HandleFunc("/api/auth/login", handlers.NewAuthLoginHandler())
-	mux.HandleFunc("/api/auth/register", handlers.NewAuthRegisterHandler())
+	mux.HandleFunc("/api/auth/login", handlers.NewAuthLoginHandler(db))
+	mux.HandleFunc("/api/auth/register", handlers.NewAuthRegisterHandler(db))
+	mux.HandleFunc("/api/auth/verify/send", handlers.NewAuthVerifySendHandler())
+	mux.HandleFunc("/api/auth/verify/check", handlers.NewAuthVerifyCheckHandler())
 	mux.HandleFunc("/api/bookings", handlers.NewAppBookingsHandler(db, merchantVaccinationClient))
 	mux.HandleFunc("/api/bookings/{bookingID}", handlers.NewAppBookingDetailHandler(db, merchantVaccinationClient))
 	mux.HandleFunc("/api/bookings/sync", handlers.NewAppBookingSyncHandler(db, os.Getenv("BOOKING_SYNC_SHARED_SECRET")))
 	mux.HandleFunc("/api/bookings/reconcile-stale", handlers.NewAppBookingReconcileHandler(db, merchantVaccinationClient, os.Getenv("BOOKING_SYNC_SHARED_SECRET")))
 	mux.HandleFunc("/clinics", handlers.NewClinicsHandler(cfg))
 	mux.HandleFunc("/emergency-clinics", handlers.NewEmergencyClinicsHandler(cfg))
+	mux.HandleFunc("/api/maps/place-photo", handlers.NewPlacePhotoProxyHandler(cfg))
 
 	// Insurance handlers
 	mux.HandleFunc("/insurance-companies", handlers.InsuranceCompaniesHandler)

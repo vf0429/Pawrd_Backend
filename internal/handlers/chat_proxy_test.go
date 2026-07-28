@@ -330,6 +330,103 @@ func TestChatProxyUsesSessionProviderFallback(t *testing.T) {
 	}
 }
 
+func TestChatProxyUsesSelectedProvidersContextWithoutSingleProviderLock(t *testing.T) {
+	var capturedProvider string
+	var capturedQuery string
+	pythonUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedProvider = r.URL.Query().Get("provider")
+		capturedQuery = r.URL.Query().Get("q")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"answer":  "ok",
+			"sources": []map[string]any{},
+		})
+	}))
+	defer pythonUpstream.Close()
+
+	cfg := &config.Config{
+		PythonRAGBaseURL:        pythonUpstream.URL,
+		PythonRAGTimeoutSeconds: 5,
+		GoRAGBaseURL:            "http://127.0.0.1:9",
+		GoRAGTimeoutSeconds:     5,
+		ChatRAGRuntime:          "python",
+	}
+	store := NewChatSessionStore()
+	handler := NewChatProxyHandler(cfg, store)
+
+	body := `{"query":"Compare @Blue Cross and @MSIG waiting period","model":"insurance","provider_scope":"selected","selected_providers":["bluecross","msig"]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status=200 got=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if capturedProvider != "" {
+		t.Fatalf("expected no single provider lock got %q", capturedProvider)
+	}
+	if !strings.Contains(capturedQuery, "Selected providers: Blue Cross, MSIG") {
+		t.Fatalf("expected selected providers context in query, got %q", capturedQuery)
+	}
+}
+
+func TestChatProxyUsesSingleSelectedProviderAsProvider(t *testing.T) {
+	var capturedProvider string
+	pythonUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedProvider = r.URL.Query().Get("provider")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"answer":  "ok",
+			"sources": []map[string]any{},
+		})
+	}))
+	defer pythonUpstream.Close()
+
+	cfg := &config.Config{
+		PythonRAGBaseURL:        pythonUpstream.URL,
+		PythonRAGTimeoutSeconds: 5,
+		GoRAGBaseURL:            "http://127.0.0.1:9",
+		GoRAGTimeoutSeconds:     5,
+		ChatRAGRuntime:          "python",
+	}
+	store := NewChatSessionStore()
+	handler := NewChatProxyHandler(cfg, store)
+
+	body := `{"query":"Tell me about @Blue Cross","model":"insurance","provider_scope":"selected","selected_providers":["bluecross"]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status=200 got=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if capturedProvider != "bluecross" {
+		t.Fatalf("expected provider=bluecross got %q", capturedProvider)
+	}
+}
+
+func TestChatProxyRejectsSelectedScopeWithoutProviders(t *testing.T) {
+	cfg := &config.Config{
+		PythonRAGBaseURL:        "http://127.0.0.1:9",
+		PythonRAGTimeoutSeconds: 5,
+		GoRAGBaseURL:            "http://127.0.0.1:9",
+		GoRAGTimeoutSeconds:     5,
+		ChatRAGRuntime:          "python",
+	}
+	store := NewChatSessionStore()
+	handler := NewChatProxyHandler(cfg, store)
+
+	body := `{"query":"Compare insurance","model":"insurance","provider_scope":"selected","selected_providers":[]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/chat", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status=400 got=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestChatProxyInvalidProviderMapsToBadRequest(t *testing.T) {
 	goUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid_provider"}`, http.StatusBadRequest)
