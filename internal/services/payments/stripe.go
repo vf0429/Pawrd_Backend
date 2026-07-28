@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/stripe/stripe-go/v82"
-	"github.com/stripe/stripe-go/v82/paymentintent"
+	"github.com/stripe/stripe-go/v83"
+	"github.com/stripe/stripe-go/v83/paymentintent"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/config"
 )
 

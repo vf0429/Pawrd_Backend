@@ -8,7 +8,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
 	github.com/mattn/go-sqlite3 v1.14.34
-	github.com/stripe/stripe-go/v82 v82.5.1
+	github.com/stripe/stripe-go/v83 v83.2.1
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.72
 	golang.org/x/crypto v0.48.0
 	googlemaps.github.io/maps v1.7.0

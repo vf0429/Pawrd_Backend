@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/stripe/stripe-go/v82"
-	"github.com/stripe/stripe-go/v82/webhook"
+	"github.com/stripe/stripe-go/v83"
+	"github.com/stripe/stripe-go/v83/webhook"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/config"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/models"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/payments"
