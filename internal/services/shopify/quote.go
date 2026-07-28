@@ -97,7 +97,7 @@ func (c *Client) CreateCartQuote(ctx context.Context, req StorefrontQuoteRequest
 			"quantity":      line.Quantity,
 		})
 	}
-	zoneCode, err := hongKongZoneCode(req.Shipping.Region)
+	provinceCode, err := hongKongProvinceCode(req.Shipping.Region)
 	if err != nil {
 		return nil, err
 	}
@@ -105,14 +105,14 @@ func (c *Client) CreateCartQuote(ctx context.Context, req StorefrontQuoteRequest
 	address := map[string]any{
 		"address": map[string]any{
 			"deliveryAddress": map[string]any{
-				"firstName":   firstName,
-				"lastName":    lastName,
-				"phone":       normalizeHKPhone(req.Shipping.Phone),
-				"address1":    strings.TrimSpace(req.Shipping.Address1),
-				"address2":    strings.TrimSpace(req.Shipping.Region),
-				"city":        strings.TrimSpace(req.Shipping.District),
-				"countryCode": "HK",
-				"zoneCode":    zoneCode,
+				"firstName":    firstName,
+				"lastName":     lastName,
+				"phone":        normalizeHKPhone(req.Shipping.Phone),
+				"address1":     strings.TrimSpace(req.Shipping.Address1),
+				"address2":     strings.TrimSpace(req.Shipping.Region),
+				"city":         strings.TrimSpace(req.Shipping.District),
+				"countryCode":  "HK",
+				"provinceCode": provinceCode,
 			},
 		},
 		"oneTimeUse":         true,
@@ -246,7 +246,7 @@ func (c *Client) SelectCartDelivery(
 	return normalizeQuoteMutation(payload.Update, "")
 }
 
-func hongKongZoneCode(region string) (string, error) {
+func hongKongProvinceCode(region string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(region)) {
 	case "hong kong island", "hk", "港島", "香港島":
 		return "HK", nil

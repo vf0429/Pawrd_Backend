@@ -96,8 +96,8 @@ func TestStorefrontQuoteCreatesCartAndSelectsAuthoritativeDelivery(t *testing.T)
 		t.Fatalf("missing Shopify address wrapper: %#v", selectableAddress)
 	}
 	deliveryAddress, ok := addressWrapper["deliveryAddress"].(map[string]any)
-	if !ok || deliveryAddress["countryCode"] != "HK" || deliveryAddress["zoneCode"] != "HK" {
-		t.Fatalf("missing Hong Kong country/zone codes: %#v", addressWrapper["deliveryAddress"])
+	if !ok || deliveryAddress["countryCode"] != "HK" || deliveryAddress["provinceCode"] != "HK" {
+		t.Fatalf("missing Hong Kong country/province codes: %#v", addressWrapper["deliveryAddress"])
 	}
 
 	finalQuote, err := client.SelectCartDelivery(
@@ -123,7 +123,7 @@ func TestStorefrontQuoteCreatesCartAndSelectsAuthoritativeDelivery(t *testing.T)
 	}
 }
 
-func TestHongKongZoneCode(t *testing.T) {
+func TestHongKongProvinceCode(t *testing.T) {
 	for _, test := range []struct {
 		region string
 		want   string
@@ -136,12 +136,12 @@ func TestHongKongZoneCode(t *testing.T) {
 		{region: "新界", want: "NT"},
 	} {
 		t.Run(test.region, func(t *testing.T) {
-			if got, err := hongKongZoneCode(test.region); err != nil || got != test.want {
-				t.Fatalf("hongKongZoneCode(%q) = %q, %v; want %q", test.region, got, err, test.want)
+			if got, err := hongKongProvinceCode(test.region); err != nil || got != test.want {
+				t.Fatalf("hongKongProvinceCode(%q) = %q, %v; want %q", test.region, got, err, test.want)
 			}
 		})
 	}
-	if _, err := hongKongZoneCode("Hong Kong"); err == nil {
+	if _, err := hongKongProvinceCode("Hong Kong"); err == nil {
 		t.Fatal("generic Hong Kong region must fail closed")
 	}
 }
