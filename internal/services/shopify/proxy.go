@@ -141,7 +141,6 @@ func (c *Client) FetchProducts(first int, after string) ([]Product, bool, string
 									}
 									availableForSale
 									requiresShipping
-									quantityAvailable
 								}
 							}
 						}
@@ -219,7 +218,7 @@ func (c *Client) SearchProducts(query string, first int) ([]Product, error) {
 						}
 						images(first: 5) { edges { node { id url altText width height } } }
 						variants(first: 5) {
-							edges { node { id title sku price { amount currencyCode } availableForSale requiresShipping quantityAvailable } }
+							edges { node { id title sku price { amount currencyCode } availableForSale requiresShipping } }
 						}
 					}
 				}
@@ -336,7 +335,6 @@ func (c *Client) FetchProductByHandle(handle string) (*Product, error) {
 							}
 							availableForSale
 							requiresShipping
-							quantityAvailable
 						}
 					}
 				}

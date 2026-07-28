@@ -27,6 +27,9 @@ func TestStorefrontQuoteCreatesCartAndSelectsAuthoritativeDelivery(t *testing.T)
 			t.Errorf("decode Storefront request: %v", err)
 			return
 		}
+		if strings.Contains(request.Query, "quantityAvailable") {
+			t.Errorf("quote query must not depend on exact-inventory Storefront scope")
+		}
 		switch {
 		case strings.Contains(request.Query, "PawrdCartQuote"):
 			createInput, _ = request.Variables["input"].(map[string]any)
@@ -175,17 +178,7 @@ func TestCreateCartQuoteRequiresExactNormalizedCartLines(t *testing.T) {
 	}
 }
 
-func TestNormalizeStorefrontQuoteFailsClosedForInventoryTaxAndAutomaticDiscounts(t *testing.T) {
-	t.Run("insufficient inventory", func(t *testing.T) {
-		cart := decodeTestQuoteCart(t, testQuoteCartJSON(false, "15.00"))
-		available := 0
-		cart.Lines.Nodes[0].Merchandise.QuantityAvailable = &available
-		if _, err := normalizeStorefrontQuote(cart, "PAWRD5", nil); err == nil ||
-			!strings.Contains(err.Error(), "insufficient inventory") {
-			t.Fatalf("expected inventory rejection, got %v", err)
-		}
-	})
-
+func TestNormalizeStorefrontQuoteFailsClosedForShippingTaxAndAutomaticDiscounts(t *testing.T) {
 	t.Run("non-shippable variant", func(t *testing.T) {
 		cart := decodeTestQuoteCart(t, testQuoteCartJSON(false, "15.00"))
 		cart.Lines.Nodes[0].Merchandise.RequiresShipping = false
@@ -298,8 +291,8 @@ func testQuoteCartJSON(selected bool, total string) string {
 			},
 			"merchandise":{
 				"id":"gid://shopify/ProductVariant/1","title":"Pink / M",
-				"availableForSale":true,"currentlyNotInStock":false,
-				"quantityAvailable":3,"requiresShipping":true,
+				"availableForSale":true,
+				"requiresShipping":true,
 				"image":{"url":"https://cdn.example/cat-bed.jpg"},
 				"product":{"title":"Cat Bed","handle":"cat-bed"}
 			}

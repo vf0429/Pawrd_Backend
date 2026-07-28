@@ -270,8 +270,6 @@ fragment PawrdQuoteCart on Cart {
           id
           title
           availableForSale
-          currentlyNotInStock
-          quantityAvailable
           requiresShipping
           image { url }
           product { title handle }
@@ -359,13 +357,11 @@ type rawQuoteCart struct {
 				TotalAmount       rawQuoteMoney `json:"totalAmount"`
 			} `json:"cost"`
 			Merchandise struct {
-				ID                  string `json:"id"`
-				Title               string `json:"title"`
-				AvailableForSale    bool   `json:"availableForSale"`
-				CurrentlyNotInStock bool   `json:"currentlyNotInStock"`
-				QuantityAvailable   *int   `json:"quantityAvailable"`
-				RequiresShipping    bool   `json:"requiresShipping"`
-				Image               *struct {
+				ID               string `json:"id"`
+				Title            string `json:"title"`
+				AvailableForSale bool   `json:"availableForSale"`
+				RequiresShipping bool   `json:"requiresShipping"`
+				Image            *struct {
 					URL string `json:"url"`
 				} `json:"image"`
 				Product struct {
@@ -481,9 +477,6 @@ func normalizeStorefrontQuote(
 		}
 		if !variant.RequiresShipping {
 			return nil, fmt.Errorf("variant %q is not configured as a shippable physical product", variant.Title)
-		}
-		if variant.QuantityAvailable != nil && !variant.CurrentlyNotInStock && rawLine.Quantity > *variant.QuantityAvailable {
-			return nil, fmt.Errorf("variant %q has insufficient inventory", variant.Title)
 		}
 		unitAmount, lineCurrency, err := quoteMoneyMinor(rawLine.Cost.AmountPerQuantity)
 		if err != nil {
