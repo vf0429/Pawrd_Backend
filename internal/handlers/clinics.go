@@ -114,9 +114,6 @@ func (s *ClinicsService) loadClinics(cfg *config.Config) {
 		}
 		if len(record) > 14 {
 			c.PhotoReference = record[14]
-			if c.PhotoReference != "" && cfg.MapsAPIKey != "" {
-				c.PhotoURL = fmt.Sprintf("https://maps.googleapis.com/maps/api/place/photo?maxwidth=800&photo_reference=%s&key=%s", c.PhotoReference, cfg.MapsAPIKey)
-			}
 		}
 
 		clinics = append(clinics, c)
@@ -265,7 +262,9 @@ func (s *ClinicsService) loadClinics(cfg *config.Config) {
 						ref := details.Photos[0].PhotoReference
 						if ref != "" {
 							target.PhotoReference = ref
-							target.PhotoURL = fmt.Sprintf("https://maps.googleapis.com/maps/api/place/photo?maxwidth=800&photo_reference=%s&key=%s", ref, cfg.MapsAPIKey)
+							// PhotoURL is materialized per HTTP request so the
+							// Google API key is never returned to the client.
+							target.PhotoURL = ""
 						}
 					}
 
@@ -371,6 +370,7 @@ func NewClinicsHandler(cfg *config.Config) http.HandlerFunc {
 			if response[i].BookingClinicID == "" {
 				response[i].BookingClinicID = bookingClinicIDForClinic(response[i])
 			}
+			materializeClinicPhotoURL(r, &response[i])
 		}
 
 		if err := json.NewEncoder(w).Encode(response); err != nil {
@@ -391,6 +391,7 @@ func NewEmergencyClinicsHandler(cfg *config.Config) http.HandlerFunc {
 		var filtered []models.Clinic
 		for _, c := range svc.clinics {
 			if strings.EqualFold(c.Emergency24h, "true") {
+				materializeClinicPhotoURL(r, &c)
 				filtered = append(filtered, c)
 			}
 		}

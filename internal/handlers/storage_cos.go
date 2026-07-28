@@ -21,6 +21,7 @@ func NewCOSPresignUploadHandler() http.HandlerFunc {
 
 		var req struct {
 			PetID    string `json:"pet_id"`
+			Scope    string `json:"scope"` // "blog" or "report"
 			Filename string `json:"filename"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -29,8 +30,9 @@ func NewCOSPresignUploadHandler() http.HandlerFunc {
 		}
 		req.PetID = strings.TrimSpace(req.PetID)
 		req.Filename = strings.TrimSpace(req.Filename)
-		if req.PetID == "" || req.Filename == "" {
-			http.Error(w, "pet_id and filename are required", http.StatusBadRequest)
+		req.Scope = strings.TrimSpace(req.Scope)
+		if req.Filename == "" {
+			http.Error(w, "filename is required", http.StatusBadRequest)
 			return
 		}
 
@@ -39,7 +41,17 @@ func NewCOSPresignUploadHandler() http.HandlerFunc {
 			http.Error(w, "cos config error: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		objectKey := store.BuildObjectKey(req.PetID, req.Filename)
+
+		var objectKey string
+		if req.Scope == "blog" {
+			objectKey = store.BuildBlogObjectKey(req.Filename)
+		} else {
+			if req.PetID == "" {
+				http.Error(w, "pet_id is required for reports", http.StatusBadRequest)
+				return
+			}
+			objectKey = store.BuildObjectKey(req.PetID, req.Filename)
+		}
 		uploadURL, expiresIn, err := store.PresignUpload(objectKey)
 		if err != nil {
 			http.Error(w, "failed to generate upload url: "+err.Error(), http.StatusInternalServerError)

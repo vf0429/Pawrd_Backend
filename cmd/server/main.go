@@ -15,10 +15,10 @@ import (
 	"github.com/wangwuxing777/Pawrd_Backend/internal/config"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/handlers"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/models"
-	"github.com/wangwuxing777/Pawrd_Backend/internal/services/chat"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/merchant"
+	"github.com/wangwuxing777/Pawrd_Backend/internal/services/payments"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/places"
-	"github.com/wangwuxing777/Pawrd_Backend/internal/services/rag"
+	"github.com/wangwuxing777/Pawrd_Backend/internal/services/shopify"
 )
 
 var port = "8000"
@@ -115,9 +115,6 @@ func main() {
 	merchantVaccinationClient := merchant.NewClient(cfg)
 	handlers.SetMirrorFreshnessWindow(bookingFreshnessWindowConfig())
 
-	// Initialize chat session store (30-minute TTL)
-	sessionStore := chat.NewSessionStore(30 * time.Minute)
-
 	// Parse flags for seeding DB
 	seedDB := flag.Bool("seed", false, "Seed the database with initial scenario data")
 	flag.Parse()
@@ -132,20 +129,30 @@ func main() {
 	if err := models.InitAuthDB(); err != nil {
 		log.Fatalf("Fatal error initializing auth db: %v", err)
 	}
+	var shopifyAdmin shopify.AdminOrderClient
+	if adminClient, adminErr := shopify.NewAdminClient(cfg); adminErr == nil {
+		shopifyAdmin = adminClient
+		if cfg.ShopifyWebhookCallbackURL != "" {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+				created, err := adminClient.EnsureWebhookSubscriptions(ctx, cfg.ShopifyWebhookCallbackURL)
+				if err != nil {
+					log.Printf("Shopify webhook subscription sync failed: %v", err)
+					return
+				}
+				log.Printf("Shopify webhook subscriptions ready: %d created", created)
+			}()
+		}
+	} else if !cfg.UseMockShopify {
+		log.Printf("Shopify Admin order operations unavailable: %v", adminErr)
+	}
+	fulfiller := payments.NewOrderDispatcher(db, shopifyAdmin)
 
 	if *seedDB {
 		SeedDatabase(db)
 		fmt.Println("Seeding complete. Exiting...")
 		return
-	}
-
-	ragClient := rag.NewClient(cfg, db)
-	if cfg.HKInsuranceRAGEnabled && cfg.HKInsuranceRAGRebuildOnStart {
-		if err := ragClient.Rebuild(context.Background()); err != nil {
-			log.Printf("HK insurance RAG rebuild on start failed: %v", err)
-		} else {
-			log.Printf("HK insurance RAG rebuild on start completed")
-		}
 	}
 
 	// Initialize new Gin router for scenarios API
@@ -156,27 +163,72 @@ func main() {
 
 	// Media upload + static file serving
 	uploadsDir := "assets/uploads"
+	thumbnailsDir := "assets/uploads/thumbs"
 	_ = os.MkdirAll(uploadsDir, 0755)
-	mux.HandleFunc("/media/upload", handlers.NewMediaUploadHandler("http://localhost:8000"))
+	_ = os.MkdirAll(thumbnailsDir, 0755)
+	publicBaseURL := os.Getenv("PUBLIC_BASE_URL")
+	if publicBaseURL == "" {
+		publicBaseURL = "http://localhost:" + port
+	}
+	mux.HandleFunc("/media/upload", handlers.NewMediaUploadHandler(publicBaseURL))
 	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(uploadsDir))))
+	mux.HandleFunc("/rag-test", handlers.NewRAGTestPageHandler())
+
+	// One-time migration: generate thumbnails for existing images
+	MigrateImageThumbnails(db, publicBaseURL)
 
 	// Core handlers
 	mux.HandleFunc("/vaccines", handlers.VaccinesHandler)
 	mux.HandleFunc("/register", handlers.RegisterHandler)
 	mux.HandleFunc("/posts", handlers.NewPostsHandler(db))
+	mux.HandleFunc("/posts/search", handlers.NewPostSearchHandler(db))
+	mux.HandleFunc("/posts/hot-keywords", handlers.NewPostHotKeywordsHandler(db))
+	mux.HandleFunc("/posts/{id}", handlers.NewPostDetailHandler(db))
+	mux.HandleFunc("/posts/{id}/like", handlers.NewPostLikeHandler(db))
+	mux.HandleFunc("/posts/{id}/collect", handlers.NewPostCollectHandler(db))
+	mux.HandleFunc("/posts/{id}/comments", handlers.NewPostCommentsHandler(db))
+	mux.HandleFunc("/posts/{id}/comments/{commentId}", handlers.NewCommentDeleteHandler(db))
+	mux.HandleFunc("/posts/{id}/share", handlers.NewPostShareHandler(db))
+	mux.HandleFunc("/posts/{id}/poll/vote", handlers.NewPostPollVoteHandler(db))
+	mux.HandleFunc("/users/{id}/follow", handlers.NewUserFollowHandler(db))
+	mux.HandleFunc("/users/{id}/followers", handlers.NewUserFollowersHandler(db))
+	mux.HandleFunc("/users/{id}/following", handlers.NewUserFollowingHandler(db))
+	mux.HandleFunc("/users/{id}/following-detail", handlers.NewUserFollowingDetailHandler(db))
+	mux.HandleFunc("/users/{id}/followers-detail", handlers.NewUserFollowersDetailHandler(db))
+	mux.HandleFunc("/users/{id}/stats", handlers.NewUserStatsHandler(db))
+	mux.HandleFunc("/api/domain/families/me", handlers.NewFamilyProfileMeHandler(db))
+	mux.HandleFunc("/api/domain/families/{idOrHandle}", handlers.NewFamilyProfileHandler(db))
+	mux.HandleFunc("/api/domain/families/{idOrHandle}/follow", handlers.NewFamilyFollowHandler(db))
+	mux.HandleFunc("/api/domain/families/{idOrHandle}/followers-detail", handlers.NewFamilyFollowersDetailHandler(db))
+	mux.HandleFunc("/api/domain/family-owner/{ownerUserID}", handlers.NewFamilyProfileByOwnerHandler(db))
+	mux.HandleFunc("/api/domain/pets/{slug}", handlers.NewPetProfileHandler(db))
+	mux.HandleFunc("/api/domain/posts", handlers.NewPostPetTagsHandler(db))
+
+	// Direct messages (1-on-1 chat)
+	mux.HandleFunc("/messages/send", handlers.NewMessageSendHandler(db))
+	mux.HandleFunc("/messages/conversations", handlers.NewConversationsHandler(db))
+	mux.HandleFunc("/messages/thread", handlers.NewMessageThreadHandler(db))
+	mux.HandleFunc("/messages/unread-count", handlers.NewMessagesUnreadCountHandler(db))
+	mux.HandleFunc("/notifications", handlers.NewNotificationsHandler(db))
+	mux.HandleFunc("/notifications/unread-count", handlers.NewNotificationsUnreadCountHandler(db))
+	mux.HandleFunc("/notifications/read-all", handlers.NewNotificationsReadAllHandler(db))
 
 	// Seed test accounts on every startup (idempotent — skips existing)
 	SeedTestAccounts()
+	EnsureDomainSeedData(db)
 
 	// Auth endpoints
-	mux.HandleFunc("/api/auth/login", handlers.NewAuthLoginHandler())
-	mux.HandleFunc("/api/auth/register", handlers.NewAuthRegisterHandler())
+	mux.HandleFunc("/api/auth/login", handlers.NewAuthLoginHandler(db))
+	mux.HandleFunc("/api/auth/register", handlers.NewAuthRegisterHandler(db))
+	mux.HandleFunc("/api/auth/verify/send", handlers.NewAuthVerifySendHandler())
+	mux.HandleFunc("/api/auth/verify/check", handlers.NewAuthVerifyCheckHandler())
 	mux.HandleFunc("/api/bookings", handlers.NewAppBookingsHandler(db, merchantVaccinationClient))
 	mux.HandleFunc("/api/bookings/{bookingID}", handlers.NewAppBookingDetailHandler(db, merchantVaccinationClient))
 	mux.HandleFunc("/api/bookings/sync", handlers.NewAppBookingSyncHandler(db, os.Getenv("BOOKING_SYNC_SHARED_SECRET")))
 	mux.HandleFunc("/api/bookings/reconcile-stale", handlers.NewAppBookingReconcileHandler(db, merchantVaccinationClient, os.Getenv("BOOKING_SYNC_SHARED_SECRET")))
 	mux.HandleFunc("/clinics", handlers.NewClinicsHandler(cfg))
 	mux.HandleFunc("/emergency-clinics", handlers.NewEmergencyClinicsHandler(cfg))
+	mux.HandleFunc("/api/maps/place-photo", handlers.NewPlacePhotoProxyHandler(cfg))
 
 	// Insurance handlers
 	mux.HandleFunc("/insurance-companies", handlers.InsuranceCompaniesHandler)
@@ -189,14 +241,17 @@ func main() {
 	mux.HandleFunc("/insurance-providers", handlers.InsuranceProvidersHandler)
 	mux.HandleFunc("/service-subcategories", handlers.ServiceSubcategoriesHandler)
 
-	// Legacy RAG chat handler (now with session support)
-	mux.HandleFunc("/api/chat", handlers.NewRAGHandler(ragClient, sessionStore))
+	// Chat compatibility proxy to the Python insurance RAG service.
+	chatStore := handlers.NewChatSessionStore()
+	mux.HandleFunc("/api/chat", handlers.NewChatProxyHandler(cfg, chatStore))
+	mux.HandleFunc("/api/chat/session", handlers.NewChatSessionHandler(chatStore))
+	mux.HandleFunc("/api/chat/session/{sessionID}/provider", handlers.NewChatSessionProviderHandler(chatStore))
 
-	// New chat session endpoints
-	mux.HandleFunc("/api/chat/session", handlers.NewChatSessionHandler(sessionStore))
-	mux.HandleFunc("/api/chat/session/", handlers.NewChatSelectProviderHandler(sessionStore)) // matches /api/chat/session/{id}/provider
-	mux.HandleFunc("/api/chat/providers", handlers.NewChatProvidersHandler(ragClient))
-	mux.HandleFunc("/api/chat/ask", handlers.NewChatAskHandler(sessionStore, ragClient))
+	// Go direct-translation RAG shadow endpoints (parity migration track).
+	mux.HandleFunc("/api/rag/go/query", handlers.NewGoRAGQueryHandler())
+	mux.HandleFunc("/api/rag/go/capabilities", handlers.NewGoRAGCapabilitiesHandler())
+	mux.HandleFunc("/api/rag/go/healthz", handlers.NewGoRAGHealthzHandler())
+	mux.HandleFunc("/api/rag/go/readyz", handlers.NewGoRAGReadyzHandler())
 
 	// Vets handler
 	placesClient := places.NewClient(cfg.MapsAPIKey)
@@ -207,10 +262,18 @@ func main() {
 	mux.HandleFunc("/api/shop/products/{handle}", handlers.NewShopProductDetailHandler(cfg))
 	mux.HandleFunc("/api/shop/categories", handlers.NewShopCategoriesHandler(cfg))
 	mux.HandleFunc("/api/shop/search", handlers.NewShopSearchHandler(cfg))
-	mux.HandleFunc("/api/shop/checkout/payment-sheet", handlers.NewShopPaymentSheetHandler(cfg))
+	mux.HandleFunc("/api/shop/checkout/payment-sheet", handlers.NewShopPaymentSheetHandler(cfg, db))
+	mux.HandleFunc("/api/payments/webhook", handlers.NewPaymentsWebhookHandler(cfg, db, fulfiller))
+	mux.HandleFunc("/api/shop/webhooks/shopify", handlers.NewShopifyWebhookHandler(cfg, db))
+	mux.HandleFunc("/api/shop/orders", handlers.NewShopOrdersHandler(db))
+	mux.HandleFunc("/api/shop/orders/{orderID}", handlers.NewShopOrderDetailHandler(db, shopifyAdmin))
+	mux.HandleFunc("/api/shop/orders/{orderID}/received", handlers.NewShopOrderReceivedHandler(db, shopifyAdmin))
+	mux.HandleFunc("/api/shop/orders/{orderID}/return-request", handlers.NewShopOrderReturnHandler(db, shopifyAdmin))
 
-	// Blog handlers
-	mux.HandleFunc("/api/posts", handlers.NewBlogHandler(db))
+	// HiCustom (custom products) handlers — designer entry + design persistence.
+	mux.HandleFunc("/api/shop/hicustom/designer-url", handlers.NewHiCustomDesignerURLHandler(cfg))
+	mux.HandleFunc("/api/shop/hicustom/designs", handlers.NewHiCustomDesignCreateHandler(cfg, db))
+	mux.HandleFunc("/api/shop/hicustom/designs/{id}", handlers.NewHiCustomDesignDetailHandler(db))
 
 	// Medical services handlers (public + admin)
 	mux.HandleFunc("/api/medical/services", handlers.NewMedicalServicesHandler(db))
@@ -227,6 +290,9 @@ func main() {
 	mux.HandleFunc("/api/profile/health-reports/{id}", handlers.NewHealthReportDetailHandler(db))
 	mux.HandleFunc("/api/profile/health-reports/observations/{observationId}/review", handlers.NewObservationReviewHandler(db))
 	mux.HandleFunc("/api/profile/pets/{petId}/health", handlers.NewPetHealthProfileHandler(db))
+	mux.HandleFunc("/api/profile/pets/{petId}/share-grants", handlers.NewPetAccessGrantsHandler(db))
+	mux.HandleFunc("/api/profile/pets/{petId}/share-grants/{grantId}/revoke", handlers.NewPetAccessGrantRevokeHandler(db))
+	mux.HandleFunc("/api/share/{token}", handlers.NewShareResolveHandler(db))
 
 	// Partner application handlers
 	mux.HandleFunc("/api/partners/apply", handlers.NewPartnersApplyHandler(db))
@@ -255,11 +321,6 @@ func main() {
 	startBookingReconcileLoop(port)
 
 	fmt.Printf("PetWell Backend running at http://localhost:%s\n", port)
-	fmt.Println("Chat endpoints:")
-	fmt.Println("  POST /api/chat/session          - Create session")
-	fmt.Println("  POST /api/chat/session/{id}/provider - Select provider")
-	fmt.Println("  GET  /api/chat/providers         - List providers")
-	fmt.Println("  POST /api/chat/ask               - Ask with context")
 
 	err = http.ListenAndServe(":"+port, mux)
 	if err != nil {

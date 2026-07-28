@@ -28,15 +28,53 @@ type User struct {
 }
 
 type BlogPost struct {
-	ID           string    `json:"id"`
-	AuthorName   string    `json:"authorName"`
-	AuthorAvatar string    `json:"authorAvatar"`
-	Title        string    `json:"title"`
-	Content      string    `json:"content"`
-	ImageColor   string    `json:"imageColor"`
-	Likes        int       `json:"likes"`
-	Timestamp    time.Time `json:"timestamp"`
-	ImageUrls    []string  `json:"imageUrls,omitempty"` // attached image URLs
+	ID           string          `json:"id"`
+	AuthorID     string          `json:"authorId"`
+	FamilyID     string          `json:"family_id,omitempty"`
+	FamilyHandle string          `json:"family_handle,omitempty"`
+	FamilyName   string          `json:"family_name,omitempty"`
+	AuthorName   string          `json:"authorName"`
+	AuthorAvatar string          `json:"authorAvatar"`
+	Title        string          `json:"title"`
+	Content      string          `json:"content"`
+	ImageColor   string          `json:"imageColor"`
+	Location     string          `json:"location,omitempty"`
+	Visibility   string          `json:"visibility,omitempty"`
+	AllowComment bool            `json:"allowComment"`
+	Likes        int             `json:"likes"`
+	CollectCount int             `json:"collectCount"`
+	Comments     int             `json:"comments"`
+	ViewCount    int             `json:"viewCount"`
+	Timestamp    time.Time       `json:"timestamp"`
+	ImageUrls    []string        `json:"imageUrls,omitempty"` // attached image URLs
+	ImageMeta    []BlogImageMeta `json:"imageMeta,omitempty"`
+	IsLiked      bool            `json:"isLiked"`     // whether the requesting user has liked this post
+	IsCollected  bool            `json:"isCollected"` // whether the requesting user has collected this post
+	Poll         *BlogPoll       `json:"poll,omitempty"`
+}
+
+// BlogPoll is the iOS-facing poll payload embedded in a post. Vote counts are
+// aggregated and `VotedOptionID` is the requesting viewer's current choice
+// (empty when they have not voted).
+type BlogPoll struct {
+	ID            string           `json:"id"`
+	Question      string           `json:"question"`
+	TotalVotes    int              `json:"totalVotes"`
+	VotedOptionID string           `json:"votedOptionId,omitempty"`
+	Options       []BlogPollOption `json:"options"`
+}
+
+type BlogPollOption struct {
+	ID    string `json:"id"`
+	Text  string `json:"text"`
+	Votes int    `json:"votes"`
+}
+
+type BlogImageMeta struct {
+	URL          string `json:"url"`
+	ThumbnailURL string `json:"thumbnailUrl,omitempty"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
 }
 
 type Clinic struct {

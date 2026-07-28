@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/stripe/stripe-go/v82"
-	"github.com/stripe/stripe-go/v82/paymentintent"
+	"github.com/stripe/stripe-go/v83"
+	"github.com/stripe/stripe-go/v83/paymentintent"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/config"
 )
 
@@ -89,4 +89,22 @@ func (s *StripeService) CreatePaymentIntent(req CreatePaymentIntentRequest) (*Cr
 		PaymentIntentID: intent.ID,
 		PublishableKey:  s.publishableKey,
 	}, nil
+}
+
+// CancelPaymentIntent compensates for a local checkout failure after Stripe has
+// already created an intent. It prevents an orphan intent from being confirmed
+// without a durable Pawrd order to receive the payment webhook.
+func (s *StripeService) CancelPaymentIntent(paymentIntentID string) error {
+	paymentIntentID = strings.TrimSpace(paymentIntentID)
+	if paymentIntentID == "" {
+		return fmt.Errorf("payment intent ID is required")
+	}
+
+	_, err := paymentintent.Cancel(paymentIntentID, &stripe.PaymentIntentCancelParams{
+		CancellationReason: stripe.String(stripe.PaymentIntentCancellationReasonAbandoned),
+	})
+	if err != nil {
+		return fmt.Errorf("cancel payment intent: %w", err)
+	}
+	return nil
 }

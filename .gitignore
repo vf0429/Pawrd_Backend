@@ -23,6 +23,9 @@ Thumbs.db
 # Temporary / debug files
 openapi_output.json
 .cache/
+artifacts/
+__pycache__/
+*.pyc
 
 # Planning artifacts in root (kept in .gemini)
 task_plan.md
@@ -30,3 +33,4 @@ findings.md
 progress.md
 main
 /server
+.omx/

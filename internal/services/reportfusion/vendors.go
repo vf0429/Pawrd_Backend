@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -28,9 +29,9 @@ type VendorDefinition struct {
 }
 
 type ExtractRequest struct {
-	ImageURLs       []string `json:"image_urls,omitempty"`
-	ImageBase64     []string `json:"image_base64,omitempty"`
-	ExtractionMode  string   `json:"extraction_mode,omitempty"` // json | markdown
+	ImageURLs      []string `json:"image_urls,omitempty"`
+	ImageBase64    []string `json:"image_base64,omitempty"`
+	ExtractionMode string   `json:"extraction_mode,omitempty"` // json | markdown
 }
 
 type VendorMarkdownResult struct {
@@ -77,8 +78,9 @@ func (c *VendorClient) ActiveVendors() []VendorDefinition {
 func (c *VendorClient) ExtractFromAll(ctx context.Context, req ExtractRequest) ([]VendorResult, error) {
 	active := c.ActiveVendors()
 	if len(active) == 0 {
-		return nil, errors.New("no active vendor endpoints configured")
+		return nil, errors.New("no active vendor endpoints configured; set REPORT_AGENT_1_ENDPOINT (and API_KEY / MODEL) to enable extraction")
 	}
+	log.Printf("[reportfusion] starting json extraction with %d active vendors", len(active))
 
 	type oneResult struct {
 		result VendorResult
@@ -91,10 +93,11 @@ func (c *VendorClient) ExtractFromAll(ctx context.Context, req ExtractRequest) (
 			start := time.Now()
 			fields, err := c.extractFromVendor(ctx, v, req)
 			if err != nil {
+				log.Printf("[reportfusion] vendor=%s model=%s mode=json failed after %s: %v", v.VendorID, v.Model, time.Since(start).Round(time.Millisecond), err)
 				ch <- oneResult{err: fmt.Errorf("%s: %w", v.VendorID, err)}
 				return
 			}
-			_ = start
+			log.Printf("[reportfusion] vendor=%s model=%s mode=json succeeded after %s with %d fields", v.VendorID, v.Model, time.Since(start).Round(time.Millisecond), len(fields))
 			ch <- oneResult{
 				result: VendorResult{
 					VendorID: v.VendorID,
@@ -130,8 +133,9 @@ func (c *VendorClient) ExtractFromAll(ctx context.Context, req ExtractRequest) (
 func (c *VendorClient) ExtractMarkdownFromAll(ctx context.Context, req ExtractRequest) ([]VendorMarkdownResult, error) {
 	active := c.ActiveVendors()
 	if len(active) == 0 {
-		return nil, errors.New("no active vendor endpoints configured")
+		return nil, errors.New("no active vendor endpoints configured; set REPORT_AGENT_1_ENDPOINT (and API_KEY / MODEL) to enable extraction")
 	}
+	log.Printf("[reportfusion] starting markdown extraction with %d active vendors", len(active))
 
 	req.ExtractionMode = "markdown"
 
@@ -143,11 +147,14 @@ func (c *VendorClient) ExtractMarkdownFromAll(ctx context.Context, req ExtractRe
 	for _, vendor := range active {
 		v := vendor
 		go func() {
+			start := time.Now()
 			markdown, err := c.extractMarkdownFromVendor(ctx, v, req)
 			if err != nil {
+				log.Printf("[reportfusion] vendor=%s model=%s mode=markdown failed after %s: %v", v.VendorID, v.Model, time.Since(start).Round(time.Millisecond), err)
 				ch <- oneResult{err: fmt.Errorf("%s: %w", v.VendorID, err)}
 				return
 			}
+			log.Printf("[reportfusion] vendor=%s model=%s mode=markdown succeeded after %s (%d chars)", v.VendorID, v.Model, time.Since(start).Round(time.Millisecond), len(strings.TrimSpace(markdown)))
 			ch <- oneResult{
 				result: VendorMarkdownResult{
 					VendorID: v.VendorID,
@@ -203,13 +210,20 @@ func (c *VendorClient) callVendor(ctx context.Context, vendor VendorDefinition, 
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, vendor.Endpoint, bytes.NewReader(body))
+	endpoint := normalizedVendorEndpoint(vendor.Endpoint)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if strings.TrimSpace(vendor.APIKey) != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+vendor.APIKey)
+		if isAnthropicCompatibleEndpoint(endpoint) {
+			httpReq.Header.Set("x-api-key", vendor.APIKey)
+			httpReq.Header.Set("anthropic-version", "2023-06-01")
+			httpReq.Header.Set("Authorization", "Bearer "+vendor.APIKey)
+		} else {
+			httpReq.Header.Set("Authorization", "Bearer "+vendor.APIKey)
+		}
 	}
 
 	resp, err := c.httpClient.Do(httpReq)
@@ -232,6 +246,58 @@ func (c *VendorClient) callVendor(ctx context.Context, vendor VendorDefinition, 
 }
 
 func buildVendorPayload(vendor VendorDefinition, req ExtractRequest) map[string]interface{} {
+	if isAnthropicCompatibleEndpoint(vendor.Endpoint) {
+		mode := strings.TrimSpace(strings.ToLower(req.ExtractionMode))
+		if mode == "" {
+			mode = "json"
+		}
+		prompt := "Extract pet health report fields and output pure JSON only: {\"fields\":[{\"metric_key\":\"string\",\"value_number\":number|null,\"value_text\":\"string\",\"unit\":\"string\",\"reference_range\":\"string\",\"qualitative_result\":\"阳性|阴性|可疑|未知\",\"confidence\":0~1}]}. Preserve original table semantics. If value is NoCt, put value_text=\"NoCt\"."
+		if mode == "markdown" {
+			prompt = "Please transcribe this pet health report into Markdown only. Keep table structure, metrics, values, units, reference ranges and positive/negative results. If unreadable, mark [unclear]. Output Markdown body only, no JSON and no extra explanation."
+		}
+
+		content := make([]map[string]interface{}, 0, len(req.ImageBase64)+1)
+		for _, b64 := range req.ImageBase64 {
+			b64 = strings.TrimSpace(b64)
+			if b64 == "" {
+				continue
+			}
+			content = append(content, map[string]interface{}{
+				"type": "image",
+				"source": map[string]interface{}{
+					"type":       "base64",
+					"media_type": "image/jpeg",
+					"data":       b64,
+				},
+			})
+		}
+		for _, u := range req.ImageURLs {
+			u = strings.TrimSpace(u)
+			if u == "" {
+				continue
+			}
+			content = append(content, map[string]interface{}{
+				"type": "text",
+				"text": "Reference image URL (fetch if supported by provider): " + u,
+			})
+		}
+		content = append(content, map[string]interface{}{
+			"type": "text",
+			"text": prompt,
+		})
+
+		return map[string]interface{}{
+			"model":      vendor.Model,
+			"max_tokens": 2048,
+			"messages": []map[string]interface{}{
+				{
+					"role":    "user",
+					"content": content,
+				},
+			},
+		}
+	}
+
 	// SiliconFlow is OpenAI-compatible. Build chat/completions payload with image input.
 	if strings.Contains(strings.ToLower(vendor.Endpoint), "siliconflow.cn") {
 		mode := strings.TrimSpace(strings.ToLower(req.ExtractionMode))
@@ -294,6 +360,10 @@ func buildVendorPayload(vendor VendorDefinition, req ExtractRequest) map[string]
 }
 
 func decodeVendorMarkdown(vendor VendorDefinition, body []byte) (string, error) {
+	if content := extractAnthropicText(body); strings.TrimSpace(content) != "" {
+		return strings.TrimSpace(content), nil
+	}
+
 	var openAICompat struct {
 		Choices []struct {
 			Message struct {
@@ -358,6 +428,26 @@ func loadVendorsFromEnv() []VendorDefinition {
 	return defs
 }
 
+func normalizedVendorEndpoint(raw string) string {
+	endpoint := strings.TrimSpace(raw)
+	if endpoint == "" {
+		return ""
+	}
+	endpoint = strings.TrimRight(endpoint, "/")
+	if isAnthropicCompatibleEndpoint(endpoint) && !strings.HasSuffix(endpoint, "/messages") {
+		if strings.HasSuffix(endpoint, "/v1") {
+			return endpoint + "/messages"
+		}
+		return endpoint + "/v1/messages"
+	}
+	return endpoint
+}
+
+func isAnthropicCompatibleEndpoint(endpoint string) bool {
+	lower := strings.ToLower(strings.TrimSpace(endpoint))
+	return strings.Contains(lower, "/apps/anthropic") || strings.Contains(lower, "anthropic")
+}
+
 func parseFloatOrDefault(raw string, fallback float64) float64 {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -377,6 +467,19 @@ func parseFloatOrDefault(raw string, fallback float64) float64 {
 }
 
 func decodeVendorFields(vendor VendorDefinition, body []byte) ([]Field, error) {
+	if content := extractAnthropicText(body); strings.TrimSpace(content) != "" {
+		content = normalizeContentPayload(content)
+		var nested struct {
+			Fields []Field `json:"fields"`
+		}
+		if err := json.Unmarshal([]byte(content), &nested); err == nil && len(nested.Fields) > 0 {
+			return nested.Fields, nil
+		}
+		if fields := decodeLooseFieldsJSON([]byte(content)); len(fields) > 0 {
+			return fields, nil
+		}
+	}
+
 	// Preferred shape: { "fields": [...] }
 	var direct struct {
 		Fields []Field `json:"fields"`
@@ -442,6 +545,26 @@ func extractContentText(raw json.RawMessage) string {
 		return strings.Join(parts, "\n")
 	}
 	return ""
+}
+
+func extractAnthropicText(body []byte) string {
+	var anthropic struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(body, &anthropic); err != nil || len(anthropic.Content) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(anthropic.Content))
+	for _, block := range anthropic.Content {
+		if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+			parts = append(parts, block.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func normalizeContentPayload(content string) string {

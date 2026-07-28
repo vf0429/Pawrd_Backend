@@ -26,6 +26,11 @@ var knownDefinitions = []definition{
 		Aliases: []string{"bluecross", "blue_cross", "blue cross", "藍十字"},
 	},
 	{
+		ID:      "MSIG",
+		Name:    "MSIG",
+		Aliases: []string{"msig"},
+	},
+	{
 		ID:      "one_degree",
 		Name:    "OneDegree",
 		Aliases: []string{"one_degree", "onedegree", "one degree"},
@@ -34,11 +39,6 @@ var knownDefinitions = []definition{
 		ID:      "prudential",
 		Name:    "Prudential 保誠",
 		Aliases: []string{"prudential", "保誠", "pruchoice"},
-	},
-	{
-		ID:      "bolttech",
-		Name:    "Bolttech",
-		Aliases: []string{"bolttech"},
 	},
 }
 
@@ -54,15 +54,29 @@ func KnownProviders() []Provider {
 }
 
 func DetectProvider(query string) string {
+	providers := DetectProviders(query)
+	if len(providers) > 0 {
+		return providers[0]
+	}
+	return ""
+}
+
+func DetectProviders(query string) []string {
 	lower := strings.ToLower(query)
+	out := make([]string, 0, len(knownDefinitions))
+	seen := map[string]struct{}{}
 	for _, provider := range knownDefinitions {
 		for _, alias := range provider.Aliases {
 			if strings.Contains(lower, alias) {
-				return provider.ID
+				if _, ok := seen[provider.ID]; !ok {
+					seen[provider.ID] = struct{}{}
+					out = append(out, provider.ID)
+				}
+				break
 			}
 		}
 	}
-	return ""
+	return out
 }
 
 func NormalizeProviderID(raw string) string {
@@ -135,8 +149,20 @@ func discoverProviders(dataPath string) map[string]bool {
 			continue
 		}
 		providerID := filepath.Base(entry.Name())
+		if !isKnownProvider(providerID) {
+			continue
+		}
 		found[providerID] = true
 	}
 
 	return found
+}
+
+func isKnownProvider(providerID string) bool {
+	for _, provider := range knownDefinitions {
+		if provider.ID == providerID {
+			return true
+		}
+	}
+	return false
 }

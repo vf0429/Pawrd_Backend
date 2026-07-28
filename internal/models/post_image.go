@@ -7,10 +7,13 @@ import (
 
 // PostImage represents an image attached to a blog post
 type PostImage struct {
-	ID       string `gorm:"type:text;primary_key" json:"id"`
-	PostID   string `gorm:"type:text;not null;index:idx_post_sort" json:"postId"`
-	ImageURL string `gorm:"type:text;not null" json:"imageUrl"`
-	SortOrder int   `gorm:"not null;index:idx_post_sort" json:"sortOrder"`
+	ID           string `gorm:"type:text;primary_key" json:"id"`
+	PostID       string `gorm:"type:text;not null;index:idx_post_sort" json:"postId"`
+	ImageURL     string `gorm:"type:text;not null" json:"imageUrl"`
+	ThumbnailURL string `gorm:"type:text" json:"thumbnailUrl"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	SortOrder    int    `gorm:"not null;index:idx_post_sort" json:"sortOrder"`
 }
 
 // BeforeCreate generates UUID before inserting a new record

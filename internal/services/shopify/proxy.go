@@ -7,20 +7,26 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/wangwuxing777/Pawrd_Backend/internal/config"
 )
 
 const (
-	defaultTimeout = 30 * time.Second
-	maxRetries     = 3
+	defaultTimeout               = 30 * time.Second
+	maxRetries                   = 3
+	privateStorefrontTokenHeader = "Shopify-Storefront-Private-Token"
+	publicStorefrontTokenHeader  = "X-Shopify-Storefront-Access-Token"
 )
+
+var publicTokenFallbackWarningOnce sync.Once
 
 // Client handles Shopify Storefront API communication
 type Client struct {
 	domain          string
 	storefrontToken string
+	authHeader      string
 	httpClient      *http.Client
 }
 
@@ -30,9 +36,20 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		return nil, err
 	}
 
+	token := cfg.ShopifyStorefrontPrivateToken
+	authHeader := privateStorefrontTokenHeader
+	if token == "" {
+		token = cfg.ShopifyStorefrontToken
+		authHeader = publicStorefrontTokenHeader
+		publicTokenFallbackWarningOnce.Do(func() {
+			log.Printf("Shopify public Storefront token fallback is active; configure SHOPIFY_STOREFRONT_PRIVATE_TOKEN for server-side access")
+		})
+	}
+
 	return &Client{
 		domain:          cfg.ShopifyDomain,
-		storefrontToken: cfg.ShopifyStorefrontToken,
+		storefrontToken: token,
+		authHeader:      authHeader,
 		httpClient: &http.Client{
 			Timeout: defaultTimeout,
 		},
@@ -366,7 +383,7 @@ func (c *Client) executeGraphQL(payload map[string]interface{}) (json.RawMessage
 		}
 
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Shopify-Storefront-Access-Token", c.storefrontToken)
+		c.setStorefrontAuthHeader(req)
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -400,6 +417,10 @@ func (c *Client) executeGraphQL(payload map[string]interface{}) (json.RawMessage
 	}
 
 	return nil, fmt.Errorf("all %d attempts failed: %w", maxRetries, lastErr)
+}
+
+func (c *Client) setStorefrontAuthHeader(req *http.Request) {
+	req.Header.Set(c.authHeader, c.storefrontToken)
 }
 
 // rawProduct is the internal representation matching Shopify's response structure

@@ -73,6 +73,15 @@ func (s *COSStore) BuildObjectKey(petID, filename string) string {
 	return fmt.Sprintf("reports/%s/%04d/%02d/%s%s", petID, now.Year(), int(now.Month()), uuid.NewString(), ext)
 }
 
+func (s *COSStore) BuildBlogObjectKey(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	if ext == "" {
+		ext = ".jpg"
+	}
+	now := time.Now().UTC()
+	return fmt.Sprintf("blog/%04d/%02d/%s%s", now.Year(), int(now.Month()), uuid.NewString(), ext)
+}
+
 func (s *COSStore) PresignUpload(objectKey string) (string, time.Duration, error) {
 	u, err := s.client.Object.GetPresignedURL(context.Background(), http.MethodPut, objectKey, s.secretID, s.secretKey, s.expiresIn, nil)
 	if err != nil {

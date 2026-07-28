@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pawrd RAG Test</title>
+    <style>
+      :root {
+        --bg: #f5f3ee;
+        --panel: #fffdf9;
+        --ink: #1c1b19;
+        --muted: #6d675f;
+        --line: #ddd5ca;
+        --accent: #1f6fff;
+        --accent-2: #ecf3ff;
+        --good: #1d7a43;
+        --bad: #b3261e;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background:
+          radial-gradient(circle at top left, #fff8e7 0%, transparent 38%),
+          linear-gradient(180deg, #f6f0e7 0%, #f3f2ef 100%);
+        color: var(--ink);
+      }
+
+      .shell {
+        width: min(960px, calc(100vw - 32px));
+        margin: 32px auto;
+        padding: 24px;
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        background: rgba(255, 253, 249, 0.94);
+        backdrop-filter: blur(12px);
+        box-shadow: 0 18px 60px rgba(34, 28, 20, 0.08);
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 28px;
+      }
+
+      .sub {
+        margin: 0 0 24px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: 1.2fr 0.8fr;
+        gap: 20px;
+      }
+
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: var(--panel);
+        padding: 18px;
+      }
+
+      label {
+        display: block;
+        margin: 0 0 8px;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--muted);
+      }
+
+      textarea,
+      select,
+      input {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 14px 14px;
+        font: inherit;
+        color: var(--ink);
+        background: #fff;
+      }
+
+      textarea {
+        min-height: 150px;
+        resize: vertical;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+
+      .actions {
+        display: flex;
+        gap: 10px;
+        margin-top: 16px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 12px 18px;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .primary {
+        background: var(--accent);
+        color: white;
+      }
+
+      .ghost {
+        background: var(--accent-2);
+        color: var(--accent);
+      }
+
+      .status {
+        margin-top: 14px;
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      .status.good { color: var(--good); }
+      .status.bad { color: var(--bad); }
+
+      .answer {
+        white-space: pre-wrap;
+        line-height: 1.6;
+        font-size: 15px;
+      }
+
+      .meta {
+        margin-top: 16px;
+        padding-top: 14px;
+        border-top: 1px dashed var(--line);
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .sources {
+        margin: 16px 0 0;
+        padding-left: 18px;
+        color: var(--ink);
+      }
+
+      .sources li {
+        margin: 0 0 10px;
+        line-height: 1.5;
+      }
+
+      .quick {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .quick button {
+        background: #f4efe8;
+        color: #3b352f;
+      }
+
+      @media (max-width: 860px) {
+        .grid { grid-template-columns: 1fr; }
+        .row { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <h1>Pawrd RAG Test</h1>
+      <p class="sub">
+        Local browser test page for the current insurance RAG path. This page calls
+        <code>/api/chat</code> on the current backend so you can inspect answers before testing in the app.
+      </p>
+
+      <section class="grid">
+        <div class="card">
+          <label for="query">Question</label>
+          <textarea id="query">What is the annual limit for Prudential room and board?</textarea>
+
+          <div class="row" style="margin-top: 14px;">
+            <div>
+              <label for="provider">Provider</label>
+              <select id="provider">
+                <option value="">All providers</option>
+                <option value="one_degree">OneDegree</option>
+                <option value="bluecross">Blue Cross</option>
+                <option value="msig">MSIG</option>
+                <option value="prudential" selected>Prudential</option>
+              </select>
+            </div>
+            <div>
+              <label for="model">Model</label>
+              <select id="model">
+                <option value="insurance" selected>Insurance</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="primary" id="askBtn">Ask RAG</button>
+            <button class="ghost" id="sessionBtn">Create Session</button>
+          </div>
+
+          <div class="status" id="status">Idle.</div>
+        </div>
+
+        <div class="card">
+          <label>Quick Test Cases</label>
+          <div class="quick">
+            <button data-query="What is the annual limit for Prudential room and board?" data-provider="prudential">Prudential room & board</button>
+            <button data-query="Blue Cross 包唔包獸醫診症？" data-provider="bluecross">Blue Cross consult coverage</button>
+            <button data-query="Compare Blue Cross and Prudential veterinary consultation limits." data-provider="">Compare consult limits</button>
+            <button data-query="What is the meaning of waiting period?" data-provider="">Waiting period meaning</button>
+          </div>
+
+          <div class="meta" id="sessionMeta">
+            Session: <span id="sessionId">none</span><br />
+            Active provider: <span id="activeProvider">none</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" style="margin-top: 20px;">
+        <label>Answer</label>
+        <div class="answer" id="answer">No answer yet.</div>
+        <div class="meta" id="meta"></div>
+        <ol class="sources" id="sources"></ol>
+      </section>
+    </main>
+
+    <script>
+      const queryEl = document.getElementById("query");
+      const providerEl = document.getElementById("provider");
+      const modelEl = document.getElementById("model");
+      const statusEl = document.getElementById("status");
+      const answerEl = document.getElementById("answer");
+      const metaEl = document.getElementById("meta");
+      const sourcesEl = document.getElementById("sources");
+      const sessionIdEl = document.getElementById("sessionId");
+      const activeProviderEl = document.getElementById("activeProvider");
+
+      let sessionId = "";
+
+      function setStatus(text, kind = "") {
+        statusEl.textContent = text;
+        statusEl.className = kind ? `status ${kind}` : "status";
+      }
+
+      async function createSession() {
+        setStatus("Creating session...");
+        const resp = await fetch("/api/chat/session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "create" }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          throw new Error(data.detail || "Failed to create session");
+        }
+        sessionId = data.session_id || "";
+        sessionIdEl.textContent = sessionId || "none";
+        setStatus("Session created.", "good");
+      }
+
+      async function askRAG() {
+        const query = queryEl.value.trim();
+        const provider = providerEl.value;
+        const model = modelEl.value;
+        if (!query) {
+          setStatus("Question is required.", "bad");
+          return;
+        }
+
+        setStatus("Querying RAG...");
+        answerEl.textContent = "Loading...";
+        metaEl.textContent = "";
+        sourcesEl.innerHTML = "";
+
+        const resp = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query,
+            session_id: sessionId || null,
+            model,
+            provider: provider || null,
+            tool: null,
+          }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          throw new Error(data.detail || `HTTP ${resp.status}`);
+        }
+
+        answerEl.textContent = data.answer || "(empty answer)";
+        activeProviderEl.textContent = data.active_provider || "none";
+        metaEl.textContent = `HTTP OK. Sources returned: ${(data.sources || []).length}`;
+        for (const source of data.sources || []) {
+          const li = document.createElement("li");
+          li.textContent = source;
+          sourcesEl.appendChild(li);
+        }
+        setStatus("Query completed.", "good");
+      }
+
+      document.getElementById("sessionBtn").addEventListener("click", async () => {
+        try {
+          await createSession();
+        } catch (err) {
+          setStatus(err.message || "Session error.", "bad");
+        }
+      });
+
+      document.getElementById("askBtn").addEventListener("click", async () => {
+        try {
+          await askRAG();
+        } catch (err) {
+          answerEl.textContent = "No answer.";
+          metaEl.textContent = "";
+          sourcesEl.innerHTML = "";
+          setStatus(err.message || "Query failed.", "bad");
+        }
+      });
+
+      for (const button of document.querySelectorAll(".quick button")) {
+        button.addEventListener("click", () => {
+          queryEl.value = button.dataset.query || "";
+          providerEl.value = button.dataset.provider || "";
+        });
+      }
+    </script>
+  </body>
+</html>

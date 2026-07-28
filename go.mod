@@ -8,7 +8,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
 	github.com/mattn/go-sqlite3 v1.14.34
-	github.com/stripe/stripe-go/v82 v82.5.1
+	github.com/stripe/stripe-go/v83 v83.2.1
 	github.com/tencentyun/cos-go-sdk-v5 v0.7.72
 	golang.org/x/crypto v0.48.0
 	googlemaps.github.io/maps v1.7.0
@@ -53,10 +53,11 @@ require (
 	go.opencensus.io v0.22.3 // indirect
 	go.uber.org/mock v0.6.0 // indirect
 	golang.org/x/arch v0.24.0 // indirect
+	golang.org/x/image v0.39.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
-	golang.org/x/sync v0.19.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/text v0.34.0 // indirect
+	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/time v0.0.0-20200416051211-89c76fbcd5d1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )

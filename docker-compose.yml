@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  pawrd-backend:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./assets/uploads:/app/assets/uploads
+      - ./assets/pet_insurance.db:/app/assets/pet_insurance.db
+      - ./assets/users.db:/app/assets/users.db
+    env_file:
+      - .env
+    restart: always
+
+volumes:
+  pawrd_uploads:

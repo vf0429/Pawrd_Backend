@@ -34,21 +34,45 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 		&CostItem{},
 		&Insurer{},
 		&Payout{},
+		&Family{},
+		&FamilyMember{},
+		&Pet{},
+		&PetPublicProfile{},
+		&PetVisibilitySetting{},
 		&Post{},
+		&PostPetTag{},
 		&PostImage{},
 		&PostLike{},
+		&PostCollection{},
+		&PostComment{},
+		&PostPoll{},
+		&PostPollOption{},
+		&PostPollVote{},
+		&PostView{},
+		&UserFollow{},
+		&FamilyFollow{},
 		&MedicalService{},
 		&Partner{},
 		&AppBookingMirror{},
 		&HealthReport{},
 		&ReportObservation{},
 		&ReportVendorExtraction{},
-		&RagDocument{},
-		&RagChunk{},
-		&RagIngestRun{},
+		&PetAccessGrant{},
+		&PetDerivedSummary{},
+		&Notification{},
+		&ChatMessage{},
+		&BlankProduct{},
+		&CustomDesign{},
+		&HiCustomOrder{},
+		&ShopOrder{},
+		&ShopOrderItem{},
+		&ShopIntegrationEvent{},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to auto migrate schema: %w", err)
+	}
+	if err := normalizePendingShopOrderIDs(db); err != nil {
+		return nil, fmt.Errorf("failed to normalize pending shop orders: %w", err)
 	}
 
 	// If using PostgreSQL, migrate Auth schema to the same database
@@ -65,6 +89,12 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 	return db, nil
 }
 
+func normalizePendingShopOrderIDs(db *gorm.DB) error {
+	return db.Model(&ShopOrder{}).
+		Where("shopify_order_id = ?", "").
+		Update("shopify_order_id", nil).Error
+}
+
 // InitAuthDB opens a separate SQLite database for user authentication
 func InitAuthDB() error {
 	if AuthDB != nil {
@@ -79,7 +109,7 @@ func InitAuthDB() error {
 		return fmt.Errorf("failed to connect auth database: %w", err)
 	}
 
-	err = db.AutoMigrate(&AuthUser{})
+	err = db.AutoMigrate(&AuthUser{}, &Verification{})
 	if err != nil {
 		return fmt.Errorf("failed to auto migrate auth schema: %w", err)
 	}
