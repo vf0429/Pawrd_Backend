@@ -343,11 +343,11 @@ func buildGrantResponse(grant models.PetAccessGrant, rawToken string) (petAccess
 
 	shareURL := ""
 	if rawToken != "" {
-		base := strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/")
+		base := sharePublicBaseURL()
 		if base == "" {
 			base = "http://localhost:8000"
 		}
-		shareURL = base + "/api/share/" + url.PathEscape(rawToken)
+		shareURL = base + sharePublicSharePath() + url.PathEscape(rawToken)
 	}
 
 	return petAccessGrantResponse{
@@ -371,6 +371,37 @@ func buildGrantResponse(grant models.PetAccessGrant, rawToken string) (petAccess
 		Note:                 grant.Note,
 		CreatedAt:            grant.CreatedAt,
 	}, nil
+}
+
+func sharePublicBaseURL() string {
+	candidates := []string{
+		os.Getenv("SHARE_PUBLIC_BASE_URL"),
+		os.Getenv("PUBLIC_WEB_BASE_URL"),
+		os.Getenv("NEXT_PUBLIC_SITE_URL"),
+		os.Getenv("PUBLIC_BASE_URL"),
+	}
+
+	for _, candidate := range candidates {
+		trimmed := strings.TrimRight(strings.TrimSpace(candidate), "/")
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+
+	return ""
+}
+
+func sharePublicSharePath() string {
+	if trimmed := strings.TrimSpace(os.Getenv("SHARE_PUBLIC_BASE_URL")); trimmed != "" {
+		return "/share/"
+	}
+	if trimmed := strings.TrimSpace(os.Getenv("PUBLIC_WEB_BASE_URL")); trimmed != "" {
+		return "/share/"
+	}
+	if trimmed := strings.TrimSpace(os.Getenv("NEXT_PUBLIC_SITE_URL")); trimmed != "" {
+		return "/share/"
+	}
+	return "/api/share/"
 }
 
 func authenticatedUserID(w http.ResponseWriter, r *http.Request) (string, bool) {

@@ -109,7 +109,7 @@ func InitAuthDB() error {
 		return fmt.Errorf("failed to connect auth database: %w", err)
 	}
 
-	err = db.AutoMigrate(&AuthUser{})
+	err = db.AutoMigrate(&AuthUser{}, &Verification{})
 	if err != nil {
 		return fmt.Errorf("failed to auto migrate auth schema: %w", err)
 	}
