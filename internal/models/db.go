@@ -3,7 +3,7 @@ package models
 import (
 	"fmt"
 	"log"
-	"os"
+	"strings"
 
 	"github.com/wangwuxing777/Pawrd_Backend/internal/config"
 	"gorm.io/driver/postgres"
@@ -15,7 +15,10 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 	var db *gorm.DB
 	var err error
 
-	dsn := os.Getenv("DATABASE_URL")
+	dsn := ""
+	if cfg != nil {
+		dsn = strings.TrimSpace(cfg.DatabaseURL)
+	}
 	if dsn != "" {
 		log.Println("DATABASE_URL variable found, connecting to PostgreSQL...")
 		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
@@ -67,6 +70,11 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 		&ShopOrder{},
 		&ShopOrderItem{},
 		&ShopIntegrationEvent{},
+		&ShopCheckoutQuote{},
+		&ShopRefund{},
+		&ShopCompensationRefundJob{},
+		&ShopRefundMirrorJob{},
+		&ShopFulfillmentJob{},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to auto migrate schema: %w", err)

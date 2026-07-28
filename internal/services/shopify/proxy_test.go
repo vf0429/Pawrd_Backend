@@ -10,6 +10,7 @@ import (
 func TestNewClientPrefersPrivateStorefrontToken(t *testing.T) {
 	client, err := NewClient(&config.Config{
 		ShopifyDomain:                 "example.myshopify.com",
+		ShopifyStorefrontAPIVersion:   "2026-07",
 		ShopifyStorefrontPrivateToken: "private-token",
 		ShopifyStorefrontToken:        "public-token",
 	})
@@ -33,8 +34,9 @@ func TestNewClientPrefersPrivateStorefrontToken(t *testing.T) {
 
 func TestNewClientFallsBackToPublicStorefrontToken(t *testing.T) {
 	client, err := NewClient(&config.Config{
-		ShopifyDomain:          "example.myshopify.com",
-		ShopifyStorefrontToken: "public-token",
+		ShopifyDomain:               "example.myshopify.com",
+		ShopifyStorefrontAPIVersion: "2026-07",
+		ShopifyStorefrontToken:      "public-token",
 	})
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
@@ -51,5 +53,19 @@ func TestNewClientFallsBackToPublicStorefrontToken(t *testing.T) {
 	}
 	if got := req.Header.Get(privateStorefrontTokenHeader); got != "" {
 		t.Fatalf("%s = %q, want empty", privateStorefrontTokenHeader, got)
+	}
+}
+
+func TestNewClientUsesConfiguredStorefrontAPIVersion(t *testing.T) {
+	client, err := NewClient(&config.Config{
+		ShopifyDomain:                 "https://example.myshopify.com/",
+		ShopifyStorefrontAPIVersion:   "2026-07",
+		ShopifyStorefrontPrivateToken: "private-token",
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	if got, want := client.endpoint, "https://example.myshopify.com/api/2026-07/graphql.json"; got != want {
+		t.Fatalf("endpoint = %q, want %q", got, want)
 	}
 }

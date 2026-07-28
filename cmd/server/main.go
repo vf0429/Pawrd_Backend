@@ -112,6 +112,20 @@ func startBookingReconcileLoop(listenPort string) {
 func main() {
 	// Load Configuration
 	cfg := config.LoadConfig()
+	if err := cfg.ValidateAuthConfig(); err != nil {
+		log.Fatalf("Fatal authentication configuration error: %v", err)
+	}
+	if err := cfg.ValidateShopOperationalSecurity(); err != nil {
+		log.Fatalf("Fatal shop operations security configuration error: %v", err)
+	}
+	if cfg.ShopCheckoutEnabled {
+		if err := cfg.ValidateShopCheckoutConfig(); err != nil {
+			log.Fatalf("Fatal shop checkout configuration error: %v", err)
+		}
+		log.Println("Shop checkout enabled with durable PostgreSQL storage.")
+	} else {
+		log.Println("Shop checkout disabled (set SHOP_CHECKOUT_ENABLED=true after configuring the complete payment pipeline).")
+	}
 	merchantVaccinationClient := merchant.NewClient(cfg)
 	handlers.SetMirrorFreshnessWindow(bookingFreshnessWindowConfig())
 
@@ -130,8 +144,12 @@ func main() {
 		log.Fatalf("Fatal error initializing auth db: %v", err)
 	}
 	var shopifyAdmin shopify.AdminOrderClient
+	var shopifyFulfillmentRequester shopify.AdminFulfillmentRequester
+	var shopifyRefundMirrorClient shopify.AdminRefundMirrorClient
 	if adminClient, adminErr := shopify.NewAdminClient(cfg); adminErr == nil {
 		shopifyAdmin = adminClient
+		shopifyFulfillmentRequester = adminClient
+		shopifyRefundMirrorClient = adminClient
 		if cfg.ShopifyWebhookCallbackURL != "" {
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -147,13 +165,35 @@ func main() {
 	} else if !cfg.UseMockShopify {
 		log.Printf("Shopify Admin order operations unavailable: %v", adminErr)
 	}
-	fulfiller := payments.NewOrderDispatcher(db, shopifyAdmin)
+	orderDispatcher := payments.NewOrderDispatcher(db, shopifyAdmin)
+	autoRequestingFulfiller := payments.NewAutoRequestingFulfiller(
+		orderDispatcher,
+		db,
+		shopifyFulfillmentRequester,
+		cfg.ShopifyAutoRequestFulfillment,
+	)
+	fulfillmentQueue := payments.NewDurableFulfillmentQueue(db, autoRequestingFulfiller)
+	refundMirrorQueue := payments.NewDurableRefundMirrorQueue(db, shopifyRefundMirrorClient)
+	var stripeRefunder payments.Refunder
+	if stripeService, stripeErr := payments.NewStripeService(cfg); stripeErr == nil {
+		stripeRefunder = stripeService
+	} else {
+		log.Printf("Stripe refund operations unavailable: %v", stripeErr)
+	}
+	compensationRefundQueue := payments.NewDurableCompensationRefundQueue(
+		db,
+		stripeRefunder,
+		refundMirrorQueue,
+	)
 
 	if *seedDB {
 		SeedDatabase(db)
 		fmt.Println("Seeding complete. Exiting...")
 		return
 	}
+	go fulfillmentQueue.Run(context.Background())
+	go refundMirrorQueue.Run(context.Background())
+	go compensationRefundQueue.Run(context.Background())
 
 	// Initialize new Gin router for scenarios API
 	insuranceV1Router := handlers.NewInsuranceV1Handler(db)
@@ -213,8 +253,11 @@ func main() {
 	mux.HandleFunc("/notifications/unread-count", handlers.NewNotificationsUnreadCountHandler(db))
 	mux.HandleFunc("/notifications/read-all", handlers.NewNotificationsReadAllHandler(db))
 
-	// Seed test accounts on every startup (idempotent — skips existing)
-	SeedTestAccounts()
+	// Known-password demo users must never be created implicitly in a live
+	// environment. Test deployments can opt in explicitly.
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("SEED_TEST_ACCOUNTS")), "true") {
+		SeedTestAccounts()
+	}
 	EnsureDomainSeedData(db)
 
 	// Auth endpoints
@@ -262,13 +305,16 @@ func main() {
 	mux.HandleFunc("/api/shop/products/{handle}", handlers.NewShopProductDetailHandler(cfg))
 	mux.HandleFunc("/api/shop/categories", handlers.NewShopCategoriesHandler(cfg))
 	mux.HandleFunc("/api/shop/search", handlers.NewShopSearchHandler(cfg))
+	mux.HandleFunc("/api/shop/checkout/quote", handlers.NewShopQuoteHandler(cfg, db))
 	mux.HandleFunc("/api/shop/checkout/payment-sheet", handlers.NewShopPaymentSheetHandler(cfg, db))
-	mux.HandleFunc("/api/payments/webhook", handlers.NewPaymentsWebhookHandler(cfg, db, fulfiller))
+	mux.HandleFunc("/api/payments/webhook", handlers.NewPaymentsWebhookHandler(cfg, db, fulfillmentQueue, refundMirrorQueue))
 	mux.HandleFunc("/api/shop/webhooks/shopify", handlers.NewShopifyWebhookHandler(cfg, db))
 	mux.HandleFunc("/api/shop/orders", handlers.NewShopOrdersHandler(db))
 	mux.HandleFunc("/api/shop/orders/{orderID}", handlers.NewShopOrderDetailHandler(db, shopifyAdmin))
 	mux.HandleFunc("/api/shop/orders/{orderID}/received", handlers.NewShopOrderReceivedHandler(db, shopifyAdmin))
 	mux.HandleFunc("/api/shop/orders/{orderID}/return-request", handlers.NewShopOrderReturnHandler(db, shopifyAdmin))
+	mux.HandleFunc("/api/admin/shop/orders/{orderID}/refund", handlers.NewShopOrderRefundHandler(db, stripeRefunder, cfg.ShopAdminKey, refundMirrorQueue))
+	mux.HandleFunc("/api/admin/shop/orders/{orderID}/request-fulfillment", handlers.NewShopOrderFulfillmentRequestHandler(db, shopifyFulfillmentRequester, cfg.ShopAdminKey))
 
 	// HiCustom (custom products) handlers — designer entry + design persistence.
 	mux.HandleFunc("/api/shop/hicustom/designer-url", handlers.NewHiCustomDesignerURLHandler(cfg))
@@ -321,8 +367,15 @@ func main() {
 	startBookingReconcileLoop(port)
 
 	fmt.Printf("PetWell Backend running at http://localhost:%s\n", port)
-
-	err = http.ListenAndServe(":"+port, mux)
+	server := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
+	err = server.ListenAndServe()
 	if err != nil {
 		fmt.Printf("Server failed to start: %v\n", err)
 	}

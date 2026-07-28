@@ -32,6 +32,7 @@ func setupGrantTestDB(t *testing.T) *gorm.DB {
 
 func seedAuthUsers(t *testing.T, db *gorm.DB) (ownerID string, recipientID string, token string) {
 	t.Helper()
+	t.Setenv("JWT_SECRET", "test-only-jwt-secret-at-least-32-characters")
 	owner := models.AuthUser{Email: "owner@example.com", Phone: "owner-phone", PasswordHash: "x", Name: "Owner"}
 	recipient := models.AuthUser{Email: "vet@example.com", Phone: "vet-phone", PasswordHash: "x", Name: "Vet"}
 	if err := db.Create(&owner).Error; err != nil {

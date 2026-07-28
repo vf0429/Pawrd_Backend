@@ -21,20 +21,32 @@ import (
 type fakeShopifyOrderAdmin struct {
 	requestedReason string
 	tagged          bool
+	snapshot        *shopify.AdminOrderSnapshot
+	afterTag        func()
+	afterReturn     func()
 }
 
 func (f *fakeShopifyOrderAdmin) CreateOrder(context.Context, shopify.AdminOrderInput) (*shopify.AdminOrderResult, error) {
 	return nil, nil
 }
 func (f *fakeShopifyOrderAdmin) FetchOrder(context.Context, string) (*shopify.AdminOrderSnapshot, error) {
+	if f.snapshot != nil {
+		return f.snapshot, nil
+	}
 	return &shopify.AdminOrderSnapshot{}, nil
 }
 func (f *fakeShopifyOrderAdmin) AddOrderTags(context.Context, string, []string) error {
 	f.tagged = true
+	if f.afterTag != nil {
+		f.afterTag()
+	}
 	return nil
 }
 func (f *fakeShopifyOrderAdmin) RequestReturn(_ context.Context, _, reason, _ string) (*shopify.AdminReturnResult, error) {
 	f.requestedReason = reason
+	if f.afterReturn != nil {
+		f.afterReturn()
+	}
 	return &shopify.AdminReturnResult{ID: "gid://shopify/Return/1", Name: "#R1", Status: "REQUESTED"}, nil
 }
 
@@ -53,6 +65,7 @@ func newShopOrderTestDB(t *testing.T) *gorm.DB {
 
 func authorizedShopRequest(t *testing.T, method, path, userID string, body any) *http.Request {
 	t.Helper()
+	t.Setenv("JWT_SECRET", "test-only-jwt-secret-at-least-32-characters")
 	var reader *bytes.Reader
 	if body == nil {
 		reader = bytes.NewReader(nil)
@@ -129,7 +142,8 @@ func TestShopOrderReceiptSyncsTagWithoutFakingDelivery(t *testing.T) {
 	order := models.ShopOrder{
 		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: "pi_2",
 		ShopifyOrderID: shopOrderStringPointer("gid://shopify/Order/2"), Status: "shipped",
-		FulfillmentStatus: "IN_TRANSIT", Currency: "HKD", TotalAmountMinor: 1000,
+		FinancialStatus: "paid", FulfillmentStatus: "IN_TRANSIT",
+		Currency: "HKD", TotalAmountMinor: 1000,
 	}
 	if err := db.Create(&order).Error; err != nil {
 		t.Fatal(err)
@@ -147,6 +161,230 @@ func TestShopOrderReceiptSyncsTagWithoutFakingDelivery(t *testing.T) {
 	if updated.CustomerReceivedAt == nil || updated.FulfillmentStatus != "IN_TRANSIT" {
 		t.Fatalf("receipt should not overwrite carrier state: %+v", updated)
 	}
+}
+
+func TestShopOrderCustomerActionsFailClosedForMoneyAndReconciliationStates(t *testing.T) {
+	tests := []struct {
+		status          string
+		financialStatus string
+		disputeStatus   string
+	}{
+		{status: "refunded", financialStatus: "refunded"},
+		{status: "payment_disputed", financialStatus: "disputed", disputeStatus: "needs_response"},
+		{status: "payment_dispute_lost", financialStatus: "dispute_lost", disputeStatus: "lost"},
+		{status: "refund_reconciliation_required", financialStatus: "paid"},
+		{status: "reconciliation_required", financialStatus: "paid"},
+	}
+	for _, test := range tests {
+		t.Run(test.status, func(t *testing.T) {
+			db := newShopOrderTestDB(t)
+			deliveredAt := time.Now().UTC()
+			order := models.ShopOrder{
+				ID: uuid.NewString(), UserID: "user-1",
+				PaymentIntentID:   "pi_" + test.status,
+				ShopifyOrderID:    shopOrderStringPointer("gid://shopify/Order/" + test.status),
+				Status:            test.status,
+				FinancialStatus:   test.financialStatus,
+				DisputeStatus:     test.disputeStatus,
+				FulfillmentStatus: "DELIVERED",
+				TrackingNumber:    "TRACK-" + test.status,
+				DeliveredAt:       &deliveredAt,
+				Currency:          "HKD",
+				TotalAmountMinor:  1000,
+			}
+			if err := db.Create(&order).Error; err != nil {
+				t.Fatal(err)
+			}
+			admin := &fakeShopifyOrderAdmin{}
+
+			receivedReq := authorizedShopRequest(
+				t,
+				http.MethodPost,
+				"/api/shop/orders/"+order.ID+"/received",
+				"user-1",
+				nil,
+			)
+			receivedReq.SetPathValue("orderID", order.ID)
+			receivedRec := httptest.NewRecorder()
+			NewShopOrderReceivedHandler(db, admin).ServeHTTP(receivedRec, receivedReq)
+			if receivedRec.Code != http.StatusConflict || admin.tagged {
+				t.Fatalf(
+					"receipt was not blocked: code=%d tagged=%t body=%s",
+					receivedRec.Code,
+					admin.tagged,
+					receivedRec.Body.String(),
+				)
+			}
+
+			returnReq := authorizedShopRequest(
+				t,
+				http.MethodPost,
+				"/api/shop/orders/"+order.ID+"/return-request",
+				"user-1",
+				map[string]any{
+					"reason": "DEFECTIVE", "confirmed": true,
+				},
+			)
+			returnReq.SetPathValue("orderID", order.ID)
+			returnRec := httptest.NewRecorder()
+			NewShopOrderReturnHandler(db, admin).ServeHTTP(returnRec, returnReq)
+			if returnRec.Code != http.StatusConflict || admin.requestedReason != "" {
+				t.Fatalf(
+					"return was not blocked: code=%d reason=%q body=%s",
+					returnRec.Code,
+					admin.requestedReason,
+					returnRec.Body.String(),
+				)
+			}
+		})
+	}
+}
+
+func TestShopOrderDetailRefreshUpdatesTrackingWithoutRegressingMoneyStatus(t *testing.T) {
+	tests := []struct {
+		status          string
+		financialStatus string
+		disputeStatus   string
+	}{
+		{status: "refunded", financialStatus: "refunded"},
+		{status: "payment_disputed", financialStatus: "disputed", disputeStatus: "needs_response"},
+		{status: "refund_reconciliation_required", financialStatus: "paid"},
+		{status: "reconciliation_required", financialStatus: "paid"},
+	}
+	for _, test := range tests {
+		t.Run(test.status, func(t *testing.T) {
+			db := newShopOrderTestDB(t)
+			order := models.ShopOrder{
+				ID: uuid.NewString(), UserID: "user-1",
+				PaymentIntentID:   "pi_detail_" + test.status,
+				ShopifyOrderID:    shopOrderStringPointer("gid://shopify/Order/detail-" + test.status),
+				Status:            test.status,
+				FinancialStatus:   test.financialStatus,
+				DisputeStatus:     test.disputeStatus,
+				FulfillmentStatus: "UNFULFILLED",
+				Currency:          "HKD",
+				TotalAmountMinor:  1000,
+			}
+			if err := db.Create(&order).Error; err != nil {
+				t.Fatal(err)
+			}
+			deliveredAt := time.Now().UTC()
+			admin := &fakeShopifyOrderAdmin{snapshot: &shopify.AdminOrderSnapshot{
+				FulfillmentStatus: "DELIVERED",
+				TrackingCompany:   "Carrier",
+				TrackingNumber:    "TRACK-TERMINAL",
+				TrackingURL:       "https://carrier.example/track",
+				DeliveredAt:       &deliveredAt,
+			}}
+			req := authorizedShopRequest(
+				t,
+				http.MethodGet,
+				"/api/shop/orders/"+order.ID,
+				"user-1",
+				nil,
+			)
+			req.SetPathValue("orderID", order.ID)
+			rec := httptest.NewRecorder()
+			NewShopOrderDetailHandler(db, admin).ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("detail response=%d body=%s", rec.Code, rec.Body.String())
+			}
+			var stored models.ShopOrder
+			if err := db.First(&stored, "id = ?", order.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if stored.Status != test.status ||
+				stored.TrackingNumber != "TRACK-TERMINAL" ||
+				stored.FulfillmentStatus != "DELIVERED" {
+				t.Fatalf("detail refresh regressed business state or lost tracking: %+v", stored)
+			}
+		})
+	}
+}
+
+func TestShopOrderCustomerWritesDoNotOverwriteConcurrentMoneyTerminal(t *testing.T) {
+	t.Run("receipt", func(t *testing.T) {
+		db := newShopOrderTestDB(t)
+		order := models.ShopOrder{
+			ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: "pi_receipt_race",
+			ShopifyOrderID: shopOrderStringPointer("gid://shopify/Order/receipt-race"),
+			Status:         "shipped", FinancialStatus: "paid", FulfillmentStatus: "IN_TRANSIT",
+			TrackingNumber: "TRACK-RACE", Currency: "HKD", TotalAmountMinor: 1000,
+		}
+		if err := db.Create(&order).Error; err != nil {
+			t.Fatal(err)
+		}
+		admin := &fakeShopifyOrderAdmin{afterTag: func() {
+			if err := db.Model(&models.ShopOrder{}).Where("id = ?", order.ID).
+				Updates(map[string]any{
+					"status": "refunded", "financial_status": "refunded",
+					"refunded_amount_minor": order.TotalAmountMinor,
+				}).Error; err != nil {
+				t.Fatalf("commit concurrent refund: %v", err)
+			}
+		}}
+		req := authorizedShopRequest(
+			t, http.MethodPost, "/api/shop/orders/"+order.ID+"/received", "user-1", nil,
+		)
+		req.SetPathValue("orderID", order.ID)
+		rec := httptest.NewRecorder()
+		NewShopOrderReceivedHandler(db, admin).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("receipt response=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var stored models.ShopOrder
+		if err := db.First(&stored, "id = ?", order.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		if stored.Status != "refunded" || stored.FinancialStatus != "refunded" {
+			t.Fatalf("receipt overwrote concurrent refund: %+v", stored)
+		}
+	})
+
+	t.Run("return", func(t *testing.T) {
+		db := newShopOrderTestDB(t)
+		receivedAt := time.Now().UTC()
+		order := models.ShopOrder{
+			ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: "pi_return_race",
+			ShopifyOrderID: shopOrderStringPointer("gid://shopify/Order/return-race"),
+			Status:         "received", FinancialStatus: "paid", FulfillmentStatus: "DELIVERED",
+			CustomerReceivedAt: &receivedAt, Currency: "HKD", TotalAmountMinor: 1000,
+		}
+		if err := db.Create(&order).Error; err != nil {
+			t.Fatal(err)
+		}
+		admin := &fakeShopifyOrderAdmin{afterReturn: func() {
+			if err := db.Model(&models.ShopOrder{}).Where("id = ?", order.ID).
+				Updates(map[string]any{
+					"status": "payment_disputed", "financial_status": "disputed",
+					"dispute_status": "needs_response", "dispute_id": "dp_return_race",
+				}).Error; err != nil {
+				t.Fatalf("commit concurrent dispute: %v", err)
+			}
+		}}
+		req := authorizedShopRequest(
+			t,
+			http.MethodPost,
+			"/api/shop/orders/"+order.ID+"/return-request",
+			"user-1",
+			map[string]any{"reason": "DEFECTIVE", "confirmed": true},
+		)
+		req.SetPathValue("orderID", order.ID)
+		rec := httptest.NewRecorder()
+		NewShopOrderReturnHandler(db, admin).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("return response=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var stored models.ShopOrder
+		if err := db.First(&stored, "id = ?", order.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		if stored.Status != "payment_disputed" ||
+			stored.FinancialStatus != "disputed" ||
+			stored.ReturnStatus != "REQUESTED" {
+			t.Fatalf("return overwrote concurrent dispute or lost external return: %+v", stored)
+		}
+	})
 }
 
 func shopOrderStringPointer(value string) *string {

@@ -3,6 +3,7 @@ package shopify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -179,6 +180,7 @@ func TestAdminTokenProviderFallsBackToStaticToken(t *testing.T) {
 func TestCreateOrderUsesSafeTagsAndSourceIdentifier(t *testing.T) {
 	const paymentIntentID = "pi_3TxoaXCtgcSY1r8p1zCPKqtT"
 	var orderVariables map[string]any
+	var optionsVariables map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Variables map[string]any `json:"variables"`
@@ -188,10 +190,12 @@ func TestCreateOrderUsesSafeTagsAndSourceIdentifier(t *testing.T) {
 			return
 		}
 		orderVariables, _ = request.Variables["order"].(map[string]any)
+		optionsVariables, _ = request.Variables["options"].(map[string]any)
 		_, _ = w.Write([]byte(`{"data":{"orderCreate":{"order":{
 			"id":"gid://shopify/Order/1",
 			"legacyResourceId":"1",
 			"name":"#1001",
+			"totalPriceSet":{"shopMoney":{"amount":"25.02","currencyCode":"HKD"}},
 			"lineItems":{"nodes":[{"id":"gid://shopify/LineItem/1"}]}
 		},"userErrors":[]}}}`))
 	}))
@@ -199,12 +203,28 @@ func TestCreateOrderUsesSafeTagsAndSourceIdentifier(t *testing.T) {
 
 	client := newTestAdminClient(server, &adminTokenProvider{staticToken: "static-token"})
 	_, err := client.CreateOrder(context.Background(), AdminOrderInput{
-		Currency:  "HKD",
-		Amount:    "25.02",
-		PaymentID: paymentIntentID,
+		Currency:        "HKD",
+		ShippingName:    "Alice Test",
+		ShippingPhone:   "+85261234567",
+		ShippingAddress: "1 Test Street",
+		ShippingCity:    "Wan Chai",
+		ShippingRegion:  "Hong Kong Island",
+		Amount:          "25.02",
+		PaymentID:       paymentIntentID,
+		QuoteID:         "quote-123",
+		ShippingTitle:   "Hong Kong Standard",
+		ShippingCode:    "STANDARD",
+		ShippingAmount:  "5.02",
+		DiscountCode:    "PAWRD5",
+		DiscountAmount:  "5.00",
+		TaxTitle:        "Sales tax",
+		TaxAmount:       "1.00",
+		TaxRate:         "0.05",
 		Lines: []AdminOrderLineInput{{
-			VariantID: "gid://shopify/ProductVariant/1",
-			Quantity:  1,
+			VariantID:        "gid://shopify/ProductVariant/1",
+			Quantity:         1,
+			RequiresShipping: true,
+			UnitPrice:        "24.00",
 		}},
 	})
 	if err != nil {
@@ -219,6 +239,238 @@ func TestCreateOrderUsesSafeTagsAndSourceIdentifier(t *testing.T) {
 	}
 	if !slices.Equal(tags, []any{"Pawrd", "Stripe"}) {
 		t.Fatalf("unexpected tags: %#v", tags)
+	}
+	lineItems, ok := orderVariables["lineItems"].([]any)
+	if !ok || len(lineItems) != 1 {
+		t.Fatalf("unexpected line items payload: %#v", orderVariables["lineItems"])
+	}
+	lineItem, ok := lineItems[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected line item: %#v", lineItems[0])
+	}
+	if lineItem["requiresShipping"] != true {
+		t.Fatalf("physical line item must require shipping: %#v", lineItem)
+	}
+	priceSet, ok := lineItem["priceSet"].(map[string]any)
+	if !ok {
+		t.Fatalf("line item must preserve quoted price: %#v", lineItem)
+	}
+	shopMoney, ok := priceSet["shopMoney"].(map[string]any)
+	if !ok || shopMoney["amount"] != "24.00" || shopMoney["currencyCode"] != "HKD" {
+		t.Fatalf("unexpected quoted line price: %#v", priceSet)
+	}
+	shippingAddress, ok := orderVariables["shippingAddress"].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected shipping address payload: %#v", orderVariables["shippingAddress"])
+	}
+	if shippingAddress["firstName"] != "Alice Test" ||
+		shippingAddress["address1"] != "1 Test Street" ||
+		shippingAddress["city"] != "Wan Chai" ||
+		shippingAddress["countryCode"] != "HK" {
+		t.Fatalf("unexpected shipping address: %#v", shippingAddress)
+	}
+	if optionsVariables["inventoryBehaviour"] != "DECREMENT_OBEYING_POLICY" ||
+		optionsVariables["sendReceipt"] != true ||
+		optionsVariables["sendFulfillmentReceipt"] != false {
+		t.Fatalf("unsafe orderCreate options: %#v", optionsVariables)
+	}
+	shippingLines, ok := orderVariables["shippingLines"].([]any)
+	if !ok || len(shippingLines) != 1 {
+		t.Fatalf("unexpected shipping lines: %#v", orderVariables["shippingLines"])
+	}
+	shippingLine, ok := shippingLines[0].(map[string]any)
+	if !ok || shippingLine["title"] != "Hong Kong Standard" || shippingLine["code"] != "STANDARD" {
+		t.Fatalf("unexpected shipping line: %#v", shippingLines[0])
+	}
+	discount, ok := orderVariables["discountCode"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing discount code: %#v", orderVariables["discountCode"])
+	}
+	fixedDiscount, ok := discount["itemFixedDiscountCode"].(map[string]any)
+	if !ok || fixedDiscount["code"] != "PAWRD5" {
+		t.Fatalf("unexpected discount code payload: %#v", discount)
+	}
+	taxLines, ok := orderVariables["taxLines"].([]any)
+	if !ok || len(taxLines) != 1 {
+		t.Fatalf("unexpected tax lines: %#v", orderVariables["taxLines"])
+	}
+	taxLine, ok := taxLines[0].(map[string]any)
+	if !ok || taxLine["rate"] != "0.05" || taxLine["title"] != "Sales tax" {
+		t.Fatalf("unexpected tax line: %#v", taxLines[0])
+	}
+	customAttributes, ok := orderVariables["customAttributes"].([]any)
+	if !ok || len(customAttributes) != 1 {
+		t.Fatalf("missing quote attribute: %#v", orderVariables["customAttributes"])
+	}
+}
+
+func TestCreateOrderClassifiesMutationUserErrorAsDeterministicRejection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"orderCreate":{"order":null,"userErrors":[{
+			"field":["order","lineItems","0","quantity"],
+			"message":"Inventory is no longer available"
+		}]}}}`))
+	}))
+	defer server.Close()
+
+	client := newTestAdminClient(server, &adminTokenProvider{staticToken: "static-token"})
+	_, err := client.CreateOrder(context.Background(), AdminOrderInput{
+		Currency: "HKD", Amount: "10.00", PaymentID: "pi_inventory_rejected",
+		Lines: []AdminOrderLineInput{{
+			VariantID: "gid://shopify/ProductVariant/1",
+			Quantity:  1, RequiresShipping: true, UnitPrice: "10.00",
+		}},
+	})
+	if !errors.Is(err, ErrOrderCreateRejected) {
+		t.Fatalf("orderCreate userError was not classified: %v", err)
+	}
+}
+
+func TestCreateOrderReplicatesFreeShippingCode(t *testing.T) {
+	var orderVariables map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode GraphQL request: %v", err)
+			return
+		}
+		orderVariables, _ = request.Variables["order"].(map[string]any)
+		_, _ = w.Write([]byte(`{"data":{"orderCreate":{"order":{
+			"id":"gid://shopify/Order/1","legacyResourceId":"1","name":"#1001",
+			"totalPriceSet":{"shopMoney":{"amount":"20.00","currencyCode":"HKD"}},
+			"lineItems":{"nodes":[{"id":"gid://shopify/LineItem/1"}]}
+		},"userErrors":[]}}}`))
+	}))
+	defer server.Close()
+
+	client := newTestAdminClient(server, &adminTokenProvider{staticToken: "static-token"})
+	if _, err := client.CreateOrder(context.Background(), AdminOrderInput{
+		Currency: "HKD", Amount: "20.00", PaymentID: "pi_free_shipping",
+		ShippingTitle: "Standard", ShippingAmount: "0.00",
+		DiscountCode: "SHIPFREE", DiscountTargetType: "SHIPPING_LINE",
+		Lines: []AdminOrderLineInput{{
+			VariantID: "gid://shopify/ProductVariant/1", Quantity: 1,
+			RequiresShipping: true, UnitPrice: "20.00",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	discount, ok := orderVariables["discountCode"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing discount code: %#v", orderVariables["discountCode"])
+	}
+	freeShipping, ok := discount["freeShippingDiscountCode"].(map[string]any)
+	if !ok || freeShipping["code"] != "SHIPFREE" {
+		t.Fatalf("unexpected free-shipping code payload: %#v", discount)
+	}
+}
+
+func TestCreateOrderPreservesPartialShippingDiscountAsFixedAmount(t *testing.T) {
+	var orderVariables map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode GraphQL request: %v", err)
+			return
+		}
+		orderVariables, _ = request.Variables["order"].(map[string]any)
+		_, _ = w.Write([]byte(`{"data":{"orderCreate":{"order":{
+			"id":"gid://shopify/Order/2","legacyResourceId":"2","name":"#1002",
+			"totalPriceSet":{"shopMoney":{"amount":"23.00","currencyCode":"HKD"}},
+			"lineItems":{"nodes":[{"id":"gid://shopify/LineItem/2"}]}
+		},"userErrors":[]}}}`))
+	}))
+	defer server.Close()
+
+	client := newTestAdminClient(server, &adminTokenProvider{staticToken: "static-token"})
+	if _, err := client.CreateOrder(context.Background(), AdminOrderInput{
+		Currency: "HKD", Amount: "23.00", PaymentID: "pi_partial_shipping",
+		ShippingTitle: "Standard", ShippingAmount: "5.00",
+		DiscountCode: "SHIP2", DiscountAmount: "2.00",
+		DiscountTargetType: "SHIPPING_LINE",
+		Lines: []AdminOrderLineInput{{
+			VariantID: "gid://shopify/ProductVariant/1", Quantity: 1,
+			RequiresShipping: true, UnitPrice: "20.00",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	discount := orderVariables["discountCode"].(map[string]any)
+	fixedDiscount, ok := discount["itemFixedDiscountCode"].(map[string]any)
+	if !ok || fixedDiscount["code"] != "SHIP2" {
+		t.Fatalf("partial shipping discount must preserve exact fixed amount: %#v", discount)
+	}
+	if _, wronglyFree := discount["freeShippingDiscountCode"]; wronglyFree {
+		t.Fatalf("partial shipping discount was incorrectly mapped to free shipping: %#v", discount)
+	}
+	attributes, ok := orderVariables["customAttributes"].([]any)
+	if !ok || len(attributes) != 1 {
+		t.Fatalf("partial shipping target audit attribute missing: %#v", orderVariables["customAttributes"])
+	}
+	attribute, ok := attributes[0].(map[string]any)
+	if !ok || attribute["key"] != "Pawrd original discount target" ||
+		attribute["value"] != "SHIPPING_LINE" {
+		t.Fatalf("unexpected partial shipping audit attribute: %#v", attributes[0])
+	}
+}
+
+func TestFindOrderBySourceIdentifier(t *testing.T) {
+	const paymentIntentID = "pi_3TxoaXCtgcSY1r8p1zCPKqtT"
+	var searchQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode GraphQL request: %v", err)
+			return
+		}
+		if !strings.Contains(request.Query, "PawrdOrderBySourceIdentifier") {
+			t.Errorf("unexpected GraphQL query: %s", request.Query)
+		}
+		searchQuery, _ = request.Variables["query"].(string)
+		_, _ = w.Write([]byte(`{"data":{"orders":{"nodes":[{
+			"id":"gid://shopify/Order/99",
+			"legacyResourceId":"99",
+			"name":"#1099",
+			"totalPriceSet":{"shopMoney":{"amount":"20.00","currencyCode":"HKD"}},
+			"lineItems":{"nodes":[
+				{"id":"gid://shopify/LineItem/101"},
+				{"id":"gid://shopify/LineItem/102"}
+			]}
+		}]}}}`))
+	}))
+	defer server.Close()
+
+	client := newTestAdminClient(server, &adminTokenProvider{staticToken: "static-token"})
+	result, err := client.FindOrderBySourceIdentifier(context.Background(), paymentIntentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if searchQuery != "source_identifier:"+paymentIntentID {
+		t.Fatalf("unexpected source search query %q", searchQuery)
+	}
+	if result == nil || result.ID != "gid://shopify/Order/99" ||
+		result.TotalAmount != "20.00" || result.Currency != "HKD" ||
+		!slices.Equal(result.LineItemIDs, []string{
+			"gid://shopify/LineItem/101", "gid://shopify/LineItem/102",
+		}) {
+		t.Fatalf("unexpected lookup result: %#v", result)
+	}
+}
+
+func TestFindOrderBySourceIdentifierRejectsSearchInjection(t *testing.T) {
+	client := &AdminClient{}
+	if _, err := client.FindOrderBySourceIdentifier(
+		context.Background(),
+		`pi_123 OR source_identifier:*`,
+	); err == nil {
+		t.Fatal("expected an unsafe source identifier to be rejected")
 	}
 }
 
