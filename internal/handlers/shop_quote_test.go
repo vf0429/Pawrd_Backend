@@ -94,6 +94,7 @@ func TestShopQuoteHandlerCreatesThenSelectsAuthoritativeDelivery(t *testing.T) {
 			return client, nil
 		},
 		func() time.Time { return time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC) },
+		fixedShopAccountEmail("alice@example.com"),
 	)
 
 	createRequest := ShopQuoteRequest{
@@ -172,6 +173,173 @@ func TestShopQuoteHandlerCreatesThenSelectsAuthoritativeDelivery(t *testing.T) {
 	}
 }
 
+func TestShopQuoteHandlerUsesCurrentAccountEmailWhenJWTEmailIsStaleOrMissing(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		jwtEmail string
+	}{
+		{name: "stale JWT email", jwtEmail: "old@example.com"},
+		{name: "missing JWT email", jwtEmail: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			token, cfg := shopFlowAuth(t, "user-current-email", test.jwtEmail)
+			db := newShopFlowTestDB(t, true)
+			initial, _ := handlerTestStorefrontQuotes()
+			client := &fakeStorefrontQuoteClient{initial: initial}
+			resolvedUserID := ""
+			handler := newShopQuoteHandler(
+				cfg,
+				db,
+				func(*config.Config) (shopify.StorefrontQuoteClient, error) {
+					return client, nil
+				},
+				time.Now,
+				func(_ context.Context, userID string) (string, error) {
+					resolvedUserID = userID
+					return "current@example.com", nil
+				},
+			)
+
+			recorder := performShopFlowRequest(t, handler, token, ShopQuoteRequest{
+				LineItems: []ShopCheckoutLineItemRequest{{
+					Source: "shopify", VariantID: "gid://shopify/ProductVariant/1", Quantity: 1,
+				}},
+				Customer: ShopCheckoutCustomerRequest{
+					Name: "Current User", Email: "current@example.com", Phone: "61234567",
+				},
+				Shipping: ShopCheckoutShippingRequest{
+					RecipientName: "Current User", Phone: "61234567",
+					Address1: "1 Test Street", District: "Wan Chai",
+					Region: "Hong Kong Island",
+				},
+			})
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			if resolvedUserID != "user-current-email" {
+				t.Fatalf("resolver user_id=%q", resolvedUserID)
+			}
+			if client.createRequest.Email != "current@example.com" {
+				t.Fatalf("Shopify email=%q, want current AuthDB email", client.createRequest.Email)
+			}
+			var stored models.ShopCheckoutQuote
+			if err := db.First(&stored).Error; err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := stored.DecodeAndVerifySnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Customer.Email != "current@example.com" {
+				t.Fatalf("sealed quote email=%q", snapshot.Customer.Email)
+			}
+		})
+	}
+}
+
+func TestShopQuoteHandlerRejectsStaleJWTEmailAsCustomerEmail(t *testing.T) {
+	token, cfg := shopFlowAuth(t, "user-email-changed", "old@example.com")
+	db := newShopFlowTestDB(t, true)
+	factoryCalls := 0
+	handler := newShopQuoteHandler(
+		cfg,
+		db,
+		func(*config.Config) (shopify.StorefrontQuoteClient, error) {
+			factoryCalls++
+			return &fakeStorefrontQuoteClient{}, nil
+		},
+		time.Now,
+		fixedShopAccountEmail("current@example.com"),
+	)
+
+	recorder := performShopFlowRequest(t, handler, token, ShopQuoteRequest{
+		LineItems: []ShopCheckoutLineItemRequest{{
+			Source: "shopify", VariantID: "gid://shopify/ProductVariant/1", Quantity: 1,
+		}},
+		Customer: ShopCheckoutCustomerRequest{
+			Name: "Current User", Email: "old@example.com", Phone: "61234567",
+		},
+		Shipping: ShopCheckoutShippingRequest{
+			RecipientName: "Current User", Phone: "61234567",
+			Address1: "1 Test Street", District: "Wan Chai",
+			Region: "Hong Kong Island",
+		},
+	})
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if factoryCalls != 0 {
+		t.Fatalf("stale JWT email reached Shopify factory %d times", factoryCalls)
+	}
+}
+
+func TestShopQuoteHandlerFailsClosedWhenAuthDBIsUnavailable(t *testing.T) {
+	previousAuthDB := models.AuthDB
+	models.AuthDB = nil
+	t.Cleanup(func() {
+		models.AuthDB = previousAuthDB
+	})
+
+	token, cfg := shopFlowAuth(t, "user-auth-db-unavailable", "alice@example.com")
+	factoryCalls := 0
+	handler := newShopQuoteHandler(
+		cfg,
+		newShopFlowTestDB(t, true),
+		func(*config.Config) (shopify.StorefrontQuoteClient, error) {
+			factoryCalls++
+			return &fakeStorefrontQuoteClient{}, nil
+		},
+		time.Now,
+		currentShopAccountEmail,
+	)
+
+	recorder := performShopFlowRequest(t, handler, token, ShopQuoteRequest{})
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if factoryCalls != 0 {
+		t.Fatalf("unavailable AuthDB reached Shopify factory %d times", factoryCalls)
+	}
+}
+
+func TestCurrentShopAccountEmailLoadsCurrentAuthDBValueByUserID(t *testing.T) {
+	authDB, err := gorm.Open(
+		sqlite.Open("file:"+strings.ReplaceAll(t.Name(), "/", "_")+"?mode=memory&cache=shared"),
+		&gorm.Config{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authDB.AutoMigrate(&models.AuthUser{}); err != nil {
+		t.Fatal(err)
+	}
+	user := models.AuthUser{
+		ID:           42,
+		Email:        "current@example.com",
+		Phone:        "phone-current-email-test",
+		PasswordHash: "not-used",
+		Name:         "Current User",
+	}
+	if err := authDB.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	previousAuthDB := models.AuthDB
+	models.AuthDB = authDB
+	t.Cleanup(func() {
+		models.AuthDB = previousAuthDB
+	})
+
+	email, err := currentShopAccountEmail(context.Background(), "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if email != "current@example.com" {
+		t.Fatalf("email=%q", email)
+	}
+}
+
 func TestShopQuoteHandlerRejectsUnsupportedSourceBeforeShopifyCall(t *testing.T) {
 	token, cfg := shopFlowAuth(t, "user-source", "alice@example.com")
 	db := newShopFlowTestDB(t, true)
@@ -184,6 +352,7 @@ func TestShopQuoteHandlerRejectsUnsupportedSourceBeforeShopifyCall(t *testing.T)
 			return &fakeStorefrontQuoteClient{}, nil
 		},
 		time.Now,
+		fixedShopAccountEmail("alice@example.com"),
 	)
 	request := ShopQuoteRequest{
 		LineItems: []ShopCheckoutLineItemRequest{{
@@ -204,6 +373,75 @@ func TestShopQuoteHandlerRejectsUnsupportedSourceBeforeShopifyCall(t *testing.T)
 	}
 	if factoryCalls != 0 {
 		t.Fatalf("unsupported source reached Shopify factory %d times", factoryCalls)
+	}
+}
+
+func TestShopQuoteHandlerRejectsInvalidCustomerPhoneBeforeShopifyCall(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		phone         string
+		wantErrorText string
+	}{
+		{
+			name:          "legacy nine digit owner phone",
+			phone:         "612345678",
+			wantErrorText: "Hong Kong phone number must contain 8 digits",
+		},
+		{
+			name:          "invalid Hong Kong leading digit",
+			phone:         "11234567",
+			wantErrorText: "Hong Kong phone number must start with 2-9",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			token, cfg := shopFlowAuth(t, "user-invalid-customer-phone", "alice@example.com")
+			db := newShopFlowTestDB(t, true)
+			factoryCalls := 0
+			handler := newShopQuoteHandler(
+				cfg,
+				db,
+				func(*config.Config) (shopify.StorefrontQuoteClient, error) {
+					factoryCalls++
+					initial, _ := handlerTestStorefrontQuotes()
+					return &fakeStorefrontQuoteClient{initial: initial}, nil
+				},
+				time.Now,
+				fixedShopAccountEmail("alice@example.com"),
+			)
+
+			recorder := performShopFlowRequest(t, handler, token, ShopQuoteRequest{
+				LineItems: []ShopCheckoutLineItemRequest{{
+					Source: "shopify", VariantID: "gid://shopify/ProductVariant/1", Quantity: 1,
+				}},
+				Customer: ShopCheckoutCustomerRequest{
+					Name: "Alice", Email: "alice@example.com", Phone: test.phone,
+				},
+				Shipping: ShopCheckoutShippingRequest{
+					RecipientName: "Alice", Phone: "61234567",
+					Address1: "1 Test Street", District: "Wan Chai",
+					Region: "Hong Kong Island",
+				},
+			})
+
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			body := recorder.Body.String()
+			if !strings.Contains(body, "Invalid customer.phone:") ||
+				!strings.Contains(body, test.wantErrorText) {
+				t.Fatalf("body=%q does not identify invalid customer.phone", body)
+			}
+			if factoryCalls != 0 {
+				t.Fatalf("invalid customer.phone reached Shopify factory %d times", factoryCalls)
+			}
+			var count int64
+			if err := db.Model(&models.ShopCheckoutQuote{}).Count(&count).Error; err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatalf("invalid customer.phone persisted %d quote rows", count)
+			}
+		})
 	}
 }
 
@@ -242,6 +480,7 @@ func TestShopQuoteHandlerRequiresExactNormalizedCartLines(t *testing.T) {
 				func() time.Time {
 					return time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 				},
+				fixedShopAccountEmail("alice@example.com"),
 			)
 
 			recorder := performShopFlowRequest(t, handler, token, ShopQuoteRequest{
@@ -294,6 +533,7 @@ func TestShopQuoteHandlerFailsClosedWhenCheckoutIsDisabled(t *testing.T) {
 			return &fakeStorefrontQuoteClient{}, nil
 		},
 		time.Now,
+		fixedShopAccountEmail("alice@example.com"),
 	)
 
 	recorder := performShopFlowRequest(t, handler, token, ShopQuoteRequest{})
@@ -317,6 +557,7 @@ func TestShopQuoteDeliverySelectionCASRejectsMutationAfterShopifyCall(t *testing
 			return client, nil
 		},
 		func() time.Time { return time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC) },
+		fixedShopAccountEmail("alice@example.com"),
 	)
 	createRecorder := performShopFlowRequest(t, handler, token, ShopQuoteRequest{
 		LineItems: []ShopCheckoutLineItemRequest{{
@@ -452,6 +693,7 @@ func TestShopPaymentSheetConsumesReadyQuoteWithStableIdempotencyKey(t *testing.T
 			return paymentService, nil
 		},
 		func() time.Time { return clock },
+		fixedShopAccountEmail("alice@example.com"),
 	)
 
 	recorder := performShopFlowRequest(t, handler, token, ShopPaymentSheetRequest{QuoteID: record.ID})
@@ -504,6 +746,144 @@ func TestShopPaymentSheetConsumesReadyQuoteWithStableIdempotencyKey(t *testing.T
 	}
 }
 
+func TestShopPaymentSheetUsesCurrentAccountEmailWhenJWTEmailIsStaleOrMissing(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		jwtEmail string
+	}{
+		{name: "stale JWT email", jwtEmail: "old@example.com"},
+		{name: "missing JWT email", jwtEmail: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			token, cfg := shopFlowAuth(t, "user-payment-current-email", test.jwtEmail)
+			db := newShopFlowTestDB(t, true)
+			clock := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+			record := persistReadyHandlerQuote(
+				t,
+				db,
+				"quote-payment-current-email",
+				"user-payment-current-email",
+				clock.Add(10*time.Minute),
+			)
+			paymentService := &fakeCheckoutPayments{}
+			handler := newShopPaymentSheetHandler(
+				cfg,
+				db,
+				func(*config.Config) (checkoutPaymentService, error) {
+					return paymentService, nil
+				},
+				func() time.Time { return clock },
+				fixedShopAccountEmail("alice@example.com"),
+			)
+
+			recorder := performShopFlowRequest(
+				t,
+				handler,
+				token,
+				ShopPaymentSheetRequest{QuoteID: record.ID},
+			)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			if len(paymentService.requests) != 1 {
+				t.Fatalf("PaymentIntent calls=%d", len(paymentService.requests))
+			}
+			request := paymentService.requests[0]
+			if request.ReceiptEmail != "alice@example.com" ||
+				request.Metadata["customer_email"] != "alice@example.com" {
+				t.Fatalf("PaymentIntent did not use sealed current email: %+v", request)
+			}
+		})
+	}
+}
+
+func TestShopPaymentSheetRejectsQuoteFromBeforeAccountEmailChanged(t *testing.T) {
+	token, cfg := shopFlowAuth(t, "user-payment-email-changed", "old@example.com")
+	db := newShopFlowTestDB(t, true)
+	clock := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	record := persistReadyHandlerQuote(
+		t,
+		db,
+		"quote-payment-email-changed",
+		"user-payment-email-changed",
+		clock.Add(10*time.Minute),
+	)
+	paymentService := &fakeCheckoutPayments{}
+	handler := newShopPaymentSheetHandler(
+		cfg,
+		db,
+		func(*config.Config) (checkoutPaymentService, error) {
+			return paymentService, nil
+		},
+		func() time.Time { return clock },
+		fixedShopAccountEmail("current@example.com"),
+	)
+
+	recorder := performShopFlowRequest(
+		t,
+		handler,
+		token,
+		ShopPaymentSheetRequest{QuoteID: record.ID},
+	)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if len(paymentService.requests) != 0 {
+		t.Fatalf("stale quote reached Stripe: %#v", paymentService.requests)
+	}
+	var stored models.ShopCheckoutQuote
+	if err := db.First(&stored, "id = ?", record.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != models.ShopQuoteStatusReady || stored.ConsumedAt != nil {
+		t.Fatalf("stale-email quote was consumed: %+v", stored)
+	}
+}
+
+func TestShopPaymentSheetFailsClosedWhenAuthUserNoLongerExists(t *testing.T) {
+	authDB, err := gorm.Open(
+		sqlite.Open("file:"+strings.ReplaceAll(t.Name(), "/", "_")+"_auth?mode=memory&cache=shared"),
+		&gorm.Config{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authDB.AutoMigrate(&models.AuthUser{}); err != nil {
+		t.Fatal(err)
+	}
+	previousAuthDB := models.AuthDB
+	models.AuthDB = authDB
+	t.Cleanup(func() {
+		models.AuthDB = previousAuthDB
+	})
+
+	token, cfg := shopFlowAuth(t, "404", "deleted@example.com")
+	paymentFactoryCalls := 0
+	handler := newShopPaymentSheetHandler(
+		cfg,
+		newShopFlowTestDB(t, true),
+		func(*config.Config) (checkoutPaymentService, error) {
+			paymentFactoryCalls++
+			return &fakeCheckoutPayments{}, nil
+		},
+		time.Now,
+		currentShopAccountEmail,
+	)
+
+	recorder := performShopFlowRequest(
+		t,
+		handler,
+		token,
+		ShopPaymentSheetRequest{QuoteID: "deleted-user-quote"},
+	)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if paymentFactoryCalls != 0 {
+		t.Fatalf("deleted AuthDB user reached Stripe factory %d times", paymentFactoryCalls)
+	}
+}
+
 func TestShopPaymentSheetDoesNotConsumeAConcurrentQuoteVersion(t *testing.T) {
 	token, cfg := shopFlowAuth(t, "user-race", "alice@example.com")
 	db := newShopFlowTestDB(t, true)
@@ -546,6 +926,7 @@ func TestShopPaymentSheetDoesNotConsumeAConcurrentQuoteVersion(t *testing.T) {
 			return paymentService, nil
 		},
 		func() time.Time { return clock },
+		fixedShopAccountEmail("alice@example.com"),
 	)
 
 	recorder := performShopFlowRequest(t, handler, token, ShopPaymentSheetRequest{QuoteID: record.ID})
@@ -589,6 +970,7 @@ func TestShopPaymentSheetRetainsIdempotentIntentWhenLocalTransactionFails(t *tes
 			return paymentService, nil
 		},
 		time.Now,
+		fixedShopAccountEmail("alice@example.com"),
 	)
 
 	for attempt := 0; attempt < 2; attempt++ {
@@ -644,6 +1026,12 @@ func shopFlowAuth(t *testing.T, userID, email string) (string, *config.Config) {
 		StripePublishableKey:          "pk_test_example",
 		StripeWebhookSecret:           "whsec_0123456789abcdef0123456789abcdef",
 		ShopAdminKey:                  "0123456789abcdef0123456789abcdef",
+	}
+}
+
+func fixedShopAccountEmail(email string) shopAccountEmailResolver {
+	return func(context.Context, string) (string, error) {
+		return email, nil
 	}
 }
 

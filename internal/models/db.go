@@ -90,6 +90,9 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to auto migrate auth schema: %w", err)
 		}
+		if err := normalizeLegacyAuthUsernameColumn(db); err != nil {
+			return nil, fmt.Errorf("failed to normalize legacy auth username schema: %w", err)
+		}
 		AuthDB = db
 	}
 
@@ -117,6 +120,9 @@ func InitAuthDB() error {
 		return fmt.Errorf("failed to connect auth database: %w", err)
 	}
 
+	if err := normalizeLegacyAuthUsernameColumn(db); err != nil {
+		return fmt.Errorf("failed to validate legacy auth username schema: %w", err)
+	}
 	err = db.AutoMigrate(&AuthUser{}, &Verification{})
 	if err != nil {
 		return fmt.Errorf("failed to auto migrate auth schema: %w", err)

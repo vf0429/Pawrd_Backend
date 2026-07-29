@@ -70,7 +70,7 @@ type checkoutPaymentServiceFactory func(*config.Config) (checkoutPaymentService,
 func NewShopPaymentSheetHandler(cfg *config.Config, db *gorm.DB) http.HandlerFunc {
 	return newShopPaymentSheetHandler(cfg, db, func(cfg *config.Config) (checkoutPaymentService, error) {
 		return payments.NewStripeService(cfg)
-	}, time.Now)
+	}, time.Now, currentShopAccountEmail)
 }
 
 func newShopPaymentSheetHandler(
@@ -78,6 +78,7 @@ func newShopPaymentSheetHandler(
 	db *gorm.DB,
 	paymentFactory checkoutPaymentServiceFactory,
 	now func() time.Time,
+	accountEmailResolver shopAccountEmailResolver,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		EnableCors(&w)
@@ -89,6 +90,15 @@ func newShopPaymentSheetHandler(
 			return
 		}
 		claims, ok := authenticatedShopClaims(w, r)
+		if !ok {
+			return
+		}
+		accountEmail, ok := resolveShopAccountEmail(
+			w,
+			r,
+			claims.UserID,
+			accountEmailResolver,
+		)
 		if !ok {
 			return
 		}
@@ -132,7 +142,10 @@ func newShopPaymentSheetHandler(
 			return
 		}
 		quoteVersion := strings.ToLower(strings.TrimSpace(quoteRecord.SnapshotSHA256))
-		if !strings.EqualFold(strings.TrimSpace(snapshot.Customer.Email), strings.TrimSpace(claims.Email)) {
+		if !strings.EqualFold(
+			strings.TrimSpace(snapshot.Customer.Email),
+			strings.TrimSpace(accountEmail),
+		) {
 			http.Error(w, "Shop quote does not belong to the authenticated account", http.StatusForbidden)
 			return
 		}
@@ -461,7 +474,11 @@ func validateHongKongShipping(shipping ShopCheckoutShippingRequest) error {
 		strings.TrimSpace(shipping.District) == "" || strings.TrimSpace(shipping.Region) == "" {
 		return fmt.Errorf("complete Hong Kong shipping address is required")
 	}
-	phone := strings.NewReplacer(" ", "", "-", "", "(", "", ")", "").Replace(strings.TrimSpace(shipping.Phone))
+	return validateHongKongPhone(shipping.Phone)
+}
+
+func validateHongKongPhone(rawPhone string) error {
+	phone := strings.NewReplacer(" ", "", "-", "", "(", "", ")", "").Replace(strings.TrimSpace(rawPhone))
 	phone = strings.TrimPrefix(phone, "+852")
 	if len(phone) != 8 {
 		return fmt.Errorf("Hong Kong phone number must contain 8 digits")

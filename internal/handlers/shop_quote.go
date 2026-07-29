@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,8 +49,18 @@ type ShopQuoteResponse struct {
 
 type storefrontQuoteClientFactory func(*config.Config) (shopify.StorefrontQuoteClient, error)
 
+type shopAccountEmailResolver func(context.Context, string) (string, error)
+
+var errShopAuthStorageUnavailable = errors.New("shop auth account storage is unavailable")
+
 func NewShopQuoteHandler(cfg *config.Config, db *gorm.DB) http.HandlerFunc {
-	return newShopQuoteHandler(cfg, db, newStorefrontQuoteClient, time.Now)
+	return newShopQuoteHandler(
+		cfg,
+		db,
+		newStorefrontQuoteClient,
+		time.Now,
+		currentShopAccountEmail,
+	)
 }
 
 func newStorefrontQuoteClient(cfg *config.Config) (shopify.StorefrontQuoteClient, error) {
@@ -64,6 +75,7 @@ func newShopQuoteHandler(
 	db *gorm.DB,
 	clientFactory storefrontQuoteClientFactory,
 	now func() time.Time,
+	accountEmailResolver shopAccountEmailResolver,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		EnableCors(&w)
@@ -75,6 +87,15 @@ func newShopQuoteHandler(
 			return
 		}
 		claims, ok := authenticatedShopClaims(w, r)
+		if !ok {
+			return
+		}
+		accountEmail, ok := resolveShopAccountEmail(
+			w,
+			r,
+			claims.UserID,
+			accountEmailResolver,
+		)
 		if !ok {
 			return
 		}
@@ -100,9 +121,27 @@ func newShopQuoteHandler(
 			err      error
 		)
 		if strings.TrimSpace(req.QuoteID) == "" {
-			response, err = createShopQuote(r, cfg, db, claims, req, clientFactory, now)
+			response, err = createShopQuote(
+				r,
+				cfg,
+				db,
+				claims,
+				accountEmail,
+				req,
+				clientFactory,
+				now,
+			)
 		} else {
-			response, err = selectShopQuoteDelivery(r, cfg, db, claims, req, clientFactory, now)
+			response, err = selectShopQuoteDelivery(
+				r,
+				cfg,
+				db,
+				claims,
+				accountEmail,
+				req,
+				clientFactory,
+				now,
+			)
 		}
 		if err != nil {
 			writeShopQuoteError(w, err)
@@ -136,6 +175,7 @@ func createShopQuote(
 	cfg *config.Config,
 	db *gorm.DB,
 	claims *auth.Claims,
+	accountEmail string,
 	req ShopQuoteRequest,
 	clientFactory storefrontQuoteClientFactory,
 	now func() time.Time,
@@ -144,7 +184,7 @@ func createShopQuote(
 	if err != nil {
 		return ShopQuoteResponse{}, err
 	}
-	if err := validateShopQuoteCustomer(claims, req.Customer); err != nil {
+	if err := validateShopQuoteCustomer(accountEmail, req.Customer); err != nil {
 		return ShopQuoteResponse{}, err
 	}
 	if err := validateHongKongShipping(req.Shipping); err != nil {
@@ -160,7 +200,7 @@ func createShopQuote(
 	}
 	storefrontQuote, err := client.CreateCartQuote(r.Context(), shopify.StorefrontQuoteRequest{
 		Lines:        lines,
-		Email:        strings.TrimSpace(req.Customer.Email),
+		Email:        strings.TrimSpace(accountEmail),
 		Phone:        strings.TrimSpace(req.Customer.Phone),
 		DiscountCode: discountCode,
 		BuyerIP:      shopBuyerIP(r),
@@ -191,7 +231,7 @@ func createShopQuote(
 		claims.UserID,
 		models.ShopQuoteCustomer{
 			Name:  strings.TrimSpace(req.Customer.Name),
-			Email: strings.TrimSpace(req.Customer.Email),
+			Email: strings.TrimSpace(accountEmail),
 			Phone: strings.TrimSpace(req.Customer.Phone),
 		},
 		models.ShopQuoteShipping{
@@ -222,6 +262,7 @@ func selectShopQuoteDelivery(
 	cfg *config.Config,
 	db *gorm.DB,
 	claims *auth.Claims,
+	accountEmail string,
 	req ShopQuoteRequest,
 	clientFactory storefrontQuoteClientFactory,
 	now func() time.Time,
@@ -257,6 +298,15 @@ func selectShopQuoteDelivery(
 	previous, err := record.DecodeAndVerifySnapshot()
 	if err != nil {
 		return ShopQuoteResponse{}, fmt.Errorf("verify shop quote: %w", err)
+	}
+	if !strings.EqualFold(
+		strings.TrimSpace(previous.Customer.Email),
+		strings.TrimSpace(accountEmail),
+	) {
+		return ShopQuoteResponse{}, quoteError(
+			http.StatusForbidden,
+			"Shop quote email no longer matches the authenticated account; request a new quote",
+		)
 	}
 	var selected *models.ShopQuoteDeliveryOption
 	for index := range previous.DeliveryOptions {
@@ -366,16 +416,19 @@ func validateShopifyQuoteLines(items []ShopCheckoutLineItemRequest) ([]shopify.S
 	return lines, nil
 }
 
-func validateShopQuoteCustomer(claims *auth.Claims, customer ShopCheckoutCustomerRequest) error {
+func validateShopQuoteCustomer(accountEmail string, customer ShopCheckoutCustomerRequest) error {
 	email := strings.ToLower(strings.TrimSpace(customer.Email))
 	if email == "" {
 		return quoteError(http.StatusBadRequest, "Customer email is required")
 	}
-	if claimEmail := strings.ToLower(strings.TrimSpace(claims.Email)); claimEmail == "" || claimEmail != email {
+	if currentEmail := strings.ToLower(strings.TrimSpace(accountEmail)); currentEmail == "" || currentEmail != email {
 		return quoteError(http.StatusForbidden, "Checkout email must match the authenticated account")
 	}
 	if strings.TrimSpace(customer.Name) == "" {
 		return quoteError(http.StatusBadRequest, "Customer name is required")
+	}
+	if err := validateHongKongPhone(customer.Phone); err != nil {
+		return quoteError(http.StatusBadRequest, "Invalid customer.phone: "+err.Error())
 	}
 	return nil
 }
@@ -592,6 +645,48 @@ func authenticatedShopClaims(w http.ResponseWriter, r *http.Request) (*auth.Clai
 		return nil, false
 	}
 	return claims, true
+}
+
+func currentShopAccountEmail(ctx context.Context, userID string) (string, error) {
+	if models.AuthDB == nil {
+		return "", errShopAuthStorageUnavailable
+	}
+	var user models.AuthUser
+	err := models.AuthDB.WithContext(ctx).
+		Select("email").
+		First(&user, "id = ?", strings.TrimSpace(userID)).
+		Error
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(user.Email), nil
+}
+
+func resolveShopAccountEmail(
+	w http.ResponseWriter,
+	r *http.Request,
+	userID string,
+	resolver shopAccountEmailResolver,
+) (string, bool) {
+	if resolver == nil {
+		http.Error(w, "Auth account storage is unavailable", http.StatusServiceUnavailable)
+		return "", false
+	}
+	email, err := resolver(r.Context(), strings.TrimSpace(userID))
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		http.Error(w, "Authenticated account not found", http.StatusUnauthorized)
+		return "", false
+	}
+	if err != nil {
+		http.Error(w, "Auth account storage is unavailable", http.StatusServiceUnavailable)
+		return "", false
+	}
+	email = strings.TrimSpace(email)
+	if email == "" {
+		http.Error(w, "Authenticated account email is unavailable", http.StatusForbidden)
+		return "", false
+	}
+	return email, true
 }
 
 func shopBuyerIP(r *http.Request) string {

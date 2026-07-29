@@ -263,6 +263,7 @@ func main() {
 	// Auth endpoints
 	mux.HandleFunc("/api/auth/login", handlers.NewAuthLoginHandler(db))
 	mux.HandleFunc("/api/auth/register", handlers.NewAuthRegisterHandler(db))
+	mux.HandleFunc("/api/auth/me", handlers.NewAuthMeHandler())
 	mux.HandleFunc("/api/auth/verify/send", handlers.NewAuthVerifySendHandler())
 	mux.HandleFunc("/api/auth/verify/check", handlers.NewAuthVerifyCheckHandler())
 	mux.HandleFunc("/api/bookings", handlers.NewAppBookingsHandler(db, merchantVaccinationClient))
