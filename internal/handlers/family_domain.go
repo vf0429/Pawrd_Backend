@@ -206,7 +206,8 @@ type updateFamilyRequest struct {
 }
 
 // NewFamilyProfileMeHandler handles GET / PUT / POST /api/domain/families/me
-// for the currently authenticated user (identified by X-User-Id).
+// for the currently authenticated user. GET is identified by X-User-Id (legacy).
+// PUT/POST are JWT-only (Bearer required; no X-User-Id fallback).
 func NewFamilyProfileMeHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		EnableCors(&w)
@@ -214,14 +215,13 @@ func NewFamilyProfileMeHandler(db *gorm.DB) http.HandlerFunc {
 			return
 		}
 
-		userID := strings.TrimSpace(r.Header.Get("X-User-Id"))
-		if userID == "" {
-			http.Error(w, "X-User-Id header required", http.StatusUnauthorized)
-			return
-		}
-
 		switch r.Method {
 		case http.MethodGet:
+			userID := strings.TrimSpace(r.Header.Get("X-User-Id"))
+			if userID == "" {
+				http.Error(w, "X-User-Id header required", http.StatusUnauthorized)
+				return
+			}
 			var family models.Family
 			if err := db.Where("owner_user_id = ?", userID).First(&family).Error; err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -239,6 +239,12 @@ func NewFamilyProfileMeHandler(db *gorm.DB) http.HandlerFunc {
 			writeJSON(w, http.StatusOK, payload)
 
 		case http.MethodPost, http.MethodPut:
+			// Writes are JWT-only; X-User-Id is NOT accepted here.
+			userID, ok := authenticatedUserID(w, r)
+			if !ok {
+				return
+			}
+
 			var req updateFamilyRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				writeAuthError(w, http.StatusBadRequest, "Invalid request body")

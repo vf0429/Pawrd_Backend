@@ -134,7 +134,7 @@ func (d *Dispatcher) fulfillShopify(req FulfillmentRequest) error {
 		ShippingCity:    order.ShippingDistrict,
 		ShippingRegion:  order.ShippingRegion,
 		Amount:          fmt.Sprintf("%.2f", float64(order.TotalAmountMinor)/100),
-		PaymentID:       order.PaymentIntentID,
+		PaymentID:       order.PaymentIntentIDValue(),
 		Lines:           lines,
 	})
 	if err != nil {

@@ -7,7 +7,7 @@ import "time"
 type ShopOrder struct {
 	ID                   string  `gorm:"primaryKey;size:36"`
 	UserID               string  `gorm:"index;size:36;not null"`
-	PaymentIntentID      string  `gorm:"uniqueIndex;size:255;not null"`
+	PaymentIntentID      *string `gorm:"uniqueIndex;size:255"`
 	ShopifyOrderID       *string `gorm:"uniqueIndex;size:255"`
 	ShopifyOrderLegacyID string  `gorm:"index;size:64"`
 	ShopifyOrderName     string  `gorm:"size:64"`
@@ -48,6 +48,17 @@ func (o ShopOrder) ShopifyOrderGID() string {
 		return ""
 	}
 	return *o.ShopifyOrderID
+}
+
+// PaymentIntentIDValue returns the Stripe PaymentIntent ID, or "" while the
+// order waits for the intent to be created. The column is NULL (not "") so the
+// unique index tolerates any number of pre-intent orders in both Postgres and
+// SQLite — same pattern as ShopifyOrderID.
+func (o ShopOrder) PaymentIntentIDValue() string {
+	if o.PaymentIntentID == nil {
+		return ""
+	}
+	return *o.PaymentIntentID
 }
 
 type ShopOrderItem struct {

@@ -43,7 +43,7 @@ func TestShopifyWebhookUpdatesFulfillmentAndDeduplicatesDelivery(t *testing.T) {
 	const secret = "webhook-secret"
 	db := newShopifyWebhookTestDB(t)
 	order := models.ShopOrder{
-		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: "pi_1",
+		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: shopOrderStringPointer("pi_1"),
 		ShopifyOrderLegacyID: "123", Status: "processing", Currency: "HKD",
 	}
 	if err := db.Create(&order).Error; err != nil {

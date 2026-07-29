@@ -27,6 +27,9 @@ type ShopCheckoutLineItemRequest struct {
 	Source string `json:"source,omitempty"`
 }
 
+// ShopCheckoutCustomerRequest is DEPRECATED and ignored: the customer identity
+// is derived server-side from the JWT user's AuthUser account. The field is
+// kept only so older iOS clients that still send it don't break.
 type ShopCheckoutCustomerRequest struct {
 	Name  string `json:"name"`
 	Email string `json:"email"`
@@ -83,11 +86,19 @@ func NewShopPaymentSheetHandler(cfg *config.Config, db *gorm.DB) http.HandlerFun
 			return
 		}
 
-		customerEmail := strings.TrimSpace(req.Customer.Email)
-		if customerEmail == "" {
-			http.Error(w, "Customer email is required", http.StatusBadRequest)
+		// Customer identity is server-authoritative: derive it from the JWT
+		// user's account, never from the client-sent customer object.
+		var account models.AuthUser
+		if err := models.AuthDB.First(&account, "id = ?", userID).Error; err != nil {
+			http.Error(w, "Account not found", http.StatusNotFound)
 			return
 		}
+		customerEmail := strings.TrimSpace(account.Email)
+		if customerEmail == "" {
+			http.Error(w, "Account email is missing", http.StatusBadRequest)
+			return
+		}
+
 		if err := validateHongKongShipping(req.Shipping); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -111,31 +122,29 @@ func NewShopPaymentSheetHandler(cfg *config.Config, db *gorm.DB) http.HandlerFun
 			return
 		}
 		orderID := uuid.NewString()
+		// PaymentIntent metadata is minimized to operational linkage only — no
+		// customer PII, no address, no user id (the webhook resolves the user
+		// through the order row). The receipt email travels via Stripe's
+		// dedicated ReceiptEmail field, not metadata.
 		metadata["pawrd_order_id"] = orderID
-		metadata["user_id"] = userID
-		metadata["customer_email"] = customerEmail
 
-		stripeService, err := payments.NewStripeService(cfg)
+		// Step 1 — initialize/validate the Stripe service BEFORE persisting
+		// anything: a config failure means no payment attempt was ever
+		// possible, so no durable order row is needed.
+		stripeService, err := newPaymentIntentService(cfg)
 		if err != nil {
 			http.Error(w, "Stripe configuration error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		intent, err := stripeService.CreatePaymentIntent(payments.CreatePaymentIntentRequest{
-			Amount:        amount,
-			Currency:      currency,
-			Description:   description,
-			ReceiptEmail:  customerEmail,
-			Metadata:      metadata,
-			StatementNote: "PAWRD",
-		})
-		if err != nil {
-			http.Error(w, "Failed to create payment intent: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+
+		// Step 2 — durable order: full immutable shipping snapshot with a
+		// NULL payment_intent_id (back-filled after the Stripe call succeeds).
+		// A failed intent creation or a client abandon leaves a reconcilable
+		// record instead of an orphan Stripe intent.
 		order := models.ShopOrder{
 			ID:               orderID,
 			UserID:           userID,
-			PaymentIntentID:  intent.PaymentIntentID,
+			PaymentIntentID:  nil,
 			Status:           "pending_payment",
 			FinancialStatus:  "pending",
 			Currency:         strings.ToUpper(currency),
@@ -152,9 +161,39 @@ func NewShopPaymentSheetHandler(cfg *config.Config, db *gorm.DB) http.HandlerFun
 		for index := range order.Items {
 			order.Items[index].OrderID = orderID
 		}
-		if err := persistCheckoutOrder(db, &order, stripeService.CancelPaymentIntent); err != nil {
+		if err := db.Create(&order).Error; err != nil {
+			log.Printf("[shop-checkout] persist order failed order=%s: %v", orderID, err)
 			http.Error(w, "Failed to persist checkout order", http.StatusInternalServerError)
 			return
+		}
+
+		// Step 3 — create the Stripe PaymentIntent.
+		intent, err := stripeService.CreatePaymentIntent(payments.CreatePaymentIntentRequest{
+			Amount:        amount,
+			Currency:      currency,
+			Description:   description,
+			ReceiptEmail:  customerEmail,
+			Metadata:      metadata,
+			StatementNote: "PAWRD",
+		})
+		if err != nil {
+			// The order stays as the durable record of the attempt.
+			reason := truncateFailureReason("stripe payment intent creation failed: " + err.Error())
+			if uerr := db.Model(&models.ShopOrder{}).Where("id = ?", orderID).
+				Updates(map[string]any{"status": "payment_failed", "financial_status": "failed", "failure_reason": reason}).Error; uerr != nil {
+				log.Printf("[shop-checkout] CRITICAL: order %s could not be marked payment_failed after Stripe error: %v", orderID, uerr)
+			}
+			http.Error(w, "Failed to create payment intent: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		// Step 4 — back-fill the intent id. If this update fails the order still
+		// exists and the intent carries pawrd_order_id, so the webhook can
+		// reconcile; log loudly and let the checkout proceed.
+		if err := db.Model(&models.ShopOrder{}).Where("id = ?", orderID).
+			Update("payment_intent_id", intent.PaymentIntentID).Error; err != nil {
+			log.Printf("[shop-checkout] CRITICAL: payment intent %s created for order %s but back-fill failed: %v — reconcile via pawrd_order_id metadata",
+				intent.PaymentIntentID, orderID, err)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -170,28 +209,22 @@ func NewShopPaymentSheetHandler(cfg *config.Config, db *gorm.DB) http.HandlerFun
 	}
 }
 
-type paymentIntentCancelFunc func(string) error
-
-func persistCheckoutOrder(db *gorm.DB, order *models.ShopOrder, cancelPaymentIntent paymentIntentCancelFunc) error {
-	if err := db.Create(order).Error; err != nil {
-		log.Printf(
-			"[shop-checkout] persist order failed order=%s payment_intent=%s: %v",
-			order.ID,
-			order.PaymentIntentID,
-			err,
-		)
-		if cancelPaymentIntent != nil {
-			if cancelErr := cancelPaymentIntent(order.PaymentIntentID); cancelErr != nil {
-				log.Printf(
-					"[shop-checkout] cancel orphan payment intent failed payment_intent=%s: %v",
-					order.PaymentIntentID,
-					cancelErr,
-				)
-			}
-		}
-		return err
+func truncateFailureReason(reason string) string {
+	const max = 500
+	if len(reason) > max {
+		return reason[:max]
 	}
-	return nil
+	return reason
+}
+
+// paymentIntentService abstracts the Stripe boundary so tests can stub it.
+type paymentIntentService interface {
+	CreatePaymentIntent(payments.CreatePaymentIntentRequest) (*payments.CreatePaymentIntentResponse, error)
+}
+
+// newPaymentIntentService is a package-level seam, swapped out in tests.
+var newPaymentIntentService = func(cfg *config.Config) (paymentIntentService, error) {
+	return payments.NewStripeService(cfg)
 }
 
 func buildCheckoutPaymentData(client ShopifyClient, db *gorm.DB, req ShopPaymentSheetRequest) (int64, string, string, map[string]string, []models.ShopOrderItem, error) {
@@ -305,8 +338,6 @@ func buildCheckoutPaymentData(client ShopifyClient, db *gorm.DB, req ShopPayment
 		})
 	}
 
-	metadata["customer_name"] = strings.TrimSpace(req.Customer.Name)
-	metadata["customer_phone"] = strings.TrimSpace(req.Customer.Phone)
 	metadata["total_items"] = strconv.Itoa(totalQuantity)
 
 	description := fmt.Sprintf("Pawrd order (%d item(s))", totalQuantity)
@@ -317,11 +348,52 @@ func buildCheckoutPaymentData(client ShopifyClient, db *gorm.DB, req ShopPayment
 	return totalAmount, currency, description, metadata, orderItems, nil
 }
 
+// hongKongDistricts maps each delivery region to its canonical districts.
+// iOS must send exactly these strings (region + district pickers).
+var hongKongDistricts = map[string][]string{
+	"Hong Kong Island": {"Central and Western", "Wan Chai", "Eastern", "Southern"},
+	"Kowloon":          {"Yau Tsim Mong", "Sham Shui Po", "Kowloon City", "Wong Tai Sin", "Kwun Tong"},
+	"New Territories":  {"Kwai Tsing", "Tsuen Wan", "Tuen Mun", "Yuen Long", "North", "Tai Po", "Sha Tin", "Sai Kung", "Islands"},
+}
+
+const (
+	maxShippingRecipientLen = 100
+	maxShippingPhoneLen     = 32
+	maxShippingAddressLen   = 200
+	maxShippingDistrictLen  = 50
+	maxShippingRegionLen    = 50
+)
+
 func validateHongKongShipping(shipping ShopCheckoutShippingRequest) error {
-	if strings.TrimSpace(shipping.RecipientName) == "" || strings.TrimSpace(shipping.Address1) == "" ||
-		strings.TrimSpace(shipping.District) == "" || strings.TrimSpace(shipping.Region) == "" {
+	recipient := strings.TrimSpace(shipping.RecipientName)
+	address1 := strings.TrimSpace(shipping.Address1)
+	district := strings.TrimSpace(shipping.District)
+	region := strings.TrimSpace(shipping.Region)
+
+	if recipient == "" || address1 == "" || district == "" || region == "" {
 		return fmt.Errorf("complete Hong Kong shipping address is required")
 	}
+	if len(recipient) > maxShippingRecipientLen || len(address1) > maxShippingAddressLen ||
+		len(district) > maxShippingDistrictLen || len(region) > maxShippingRegionLen ||
+		len(strings.TrimSpace(shipping.Phone)) > maxShippingPhoneLen {
+		return fmt.Errorf("shipping fields exceed the maximum length")
+	}
+
+	districts, regionKnown := hongKongDistricts[region]
+	if !regionKnown {
+		return fmt.Errorf("unknown Hong Kong region '%s'", region)
+	}
+	districtKnown := false
+	for _, d := range districts {
+		if d == district {
+			districtKnown = true
+			break
+		}
+	}
+	if !districtKnown {
+		return fmt.Errorf("unknown district '%s' for region '%s'", district, region)
+	}
+
 	phone := strings.NewReplacer(" ", "", "-", "", "(", "", ")", "").Replace(strings.TrimSpace(shipping.Phone))
 	phone = strings.TrimPrefix(phone, "+852")
 	if len(phone) != 8 {

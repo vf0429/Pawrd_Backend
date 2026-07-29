@@ -78,7 +78,7 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 	// If using PostgreSQL, migrate Auth schema to the same database
 	if dsn != "" {
 		log.Println("Migrating Auth schema to PostgreSQL database...")
-		err = db.AutoMigrate(&AuthUser{})
+		err = db.AutoMigrate(&AuthUser{}, &Verification{})
 		if err != nil {
 			return nil, fmt.Errorf("failed to auto migrate auth schema: %w", err)
 		}
@@ -90,9 +90,18 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 }
 
 func normalizePendingShopOrderIDs(db *gorm.DB) error {
-	return db.Model(&ShopOrder{}).
+	// Empty strings in unique-indexed nullable columns must be NULL so multiple
+	// pending rows don't collide (SQLite treats "" as a real value; Postgres
+	// allows many NULLs). Applies to orders written before the columns became
+	// nullable.
+	if err := db.Model(&ShopOrder{}).
 		Where("shopify_order_id = ?", "").
-		Update("shopify_order_id", nil).Error
+		Update("shopify_order_id", nil).Error; err != nil {
+		return err
+	}
+	return db.Model(&ShopOrder{}).
+		Where("payment_intent_id = ?", "").
+		Update("payment_intent_id", nil).Error
 }
 
 // InitAuthDB opens a separate SQLite database for user authentication

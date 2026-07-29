@@ -76,7 +76,7 @@ func TestShopOrderReturnRequestIsOwnedConfirmedAndSynced(t *testing.T) {
 	db := newShopOrderTestDB(t)
 	receivedAt := time.Now().UTC()
 	order := models.ShopOrder{
-		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: "pi_1",
+		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: shopOrderStringPointer("pi_1"),
 		ShopifyOrderID: shopOrderStringPointer("gid://shopify/Order/1"), Status: "received",
 		FinancialStatus: "paid", FulfillmentStatus: "DELIVERED", Currency: "HKD",
 		TotalAmountMinor: 1000, CustomerReceivedAt: &receivedAt,
@@ -109,7 +109,7 @@ func TestShopOrderReturnRequestIsOwnedConfirmedAndSynced(t *testing.T) {
 func TestShopOrderCannotBeReadByAnotherUser(t *testing.T) {
 	db := newShopOrderTestDB(t)
 	order := models.ShopOrder{
-		ID: uuid.NewString(), UserID: "owner", PaymentIntentID: "pi_private",
+		ID: uuid.NewString(), UserID: "owner", PaymentIntentID: shopOrderStringPointer("pi_private"),
 		Status: "processing", Currency: "HKD", TotalAmountMinor: 1000,
 	}
 	if err := db.Create(&order).Error; err != nil {
@@ -127,7 +127,7 @@ func TestShopOrderCannotBeReadByAnotherUser(t *testing.T) {
 func TestShopOrderReceiptSyncsTagWithoutFakingDelivery(t *testing.T) {
 	db := newShopOrderTestDB(t)
 	order := models.ShopOrder{
-		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: "pi_2",
+		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: shopOrderStringPointer("pi_2"),
 		ShopifyOrderID: shopOrderStringPointer("gid://shopify/Order/2"), Status: "shipped",
 		FulfillmentStatus: "IN_TRANSIT", Currency: "HKD", TotalAmountMinor: 1000,
 	}
