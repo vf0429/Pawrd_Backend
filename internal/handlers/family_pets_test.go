@@ -407,6 +407,7 @@ func TestFamilyPetUpdateOwnership(t *testing.T) {
 func TestFamilyPetCreateRollsBackOnMidTransactionFailure(t *testing.T) {
 	// DB without the pet_visibility_settings table → the transaction fails
 	// after the pet + public profile inserts, and both must be rolled back.
+	t.Setenv("JWT_SECRET", "test-only-jwt-secret-at-least-32-characters")
 	dsn := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "?mode=memory&cache=shared"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {

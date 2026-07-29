@@ -2,15 +2,17 @@ package handlers
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/stripe/stripe-go/v83"
 	"github.com/stripe/stripe-go/v83/webhook"
-	"github.com/wangwuxing777/Pawrd_Backend/internal/auth"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/config"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/models"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/payments"
@@ -23,44 +25,159 @@ type recordingFulfiller struct {
 	called  bool
 }
 
+func newPaymentsWebhookTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&models.ShopOrder{}, &models.ShopRefund{}, &models.ShopIntegrationEvent{}); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+func serveSignedStripeWebhook(
+	t *testing.T,
+	db *gorm.DB,
+	fulfiller payments.Fulfiller,
+	secret string,
+	payload []byte,
+	refundMirrors ...payments.RefundMirrorEnqueuer,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	signed := webhook.GenerateTestSignedPayload(&webhook.UnsignedPayload{
+		Payload: payload,
+		Secret:  secret,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/payments/webhook", bytes.NewReader(payload))
+	req.Header.Set("Stripe-Signature", signed.Header)
+	rec := httptest.NewRecorder()
+	NewPaymentsWebhookHandler(
+		&config.Config{StripeWebhookSecret: secret},
+		db,
+		fulfiller,
+		refundMirrors...,
+	).ServeHTTP(rec, req)
+	return rec
+}
+
 func (f *recordingFulfiller) Fulfill(request payments.FulfillmentRequest) error {
 	f.request = request
 	f.called = true
 	return nil
 }
 
-func TestPaymentsWebhookAcceptsNewerCloverEvent(t *testing.T) {
-	const webhookSecret = "whsec_test"
-	payload := []byte(`{
+func newSucceededWebhookFixture(t *testing.T) (*gorm.DB, []byte) {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(
+		&models.ShopOrder{},
+		&models.ShopCheckoutQuote{},
+		&models.ShopRefund{},
+		&models.ShopCompensationRefundJob{},
+		&models.ShopFulfillmentJob{},
+		&models.ShopIntegrationEvent{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	const (
+		orderID = "11111111-1111-1111-1111-111111111111"
+		quoteID = "22222222-2222-2222-2222-222222222222"
+		userID  = "user-clover"
+		piID    = "pi_clover_test"
+	)
+	order := models.ShopOrder{
+		ID: orderID, UserID: userID, PaymentIntentID: shopOrderStringPointer(piID),
+		Status: "pending_payment", FinancialStatus: "pending",
+		Currency: "HKD", TotalAmountMinor: 1000,
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	quotedAt := time.Unix(1_700_000_000, 0).UTC()
+	expiresAt := quotedAt.Add(10 * time.Minute)
+	quote := models.ShopCheckoutQuote{ID: quoteID}
+	if err := quote.SetSnapshot(models.ShopQuoteSnapshot{
+		Version:              models.ShopQuoteSnapshotVersion,
+		ShopifyCartID:        "gid://shopify/Cart/clover",
+		ShopifyCartUpdatedAt: quotedAt,
+		UserID:               userID,
+		Status:               models.ShopQuoteStatusReady,
+		Currency:             "HKD",
+		LineItems: []models.ShopQuoteSnapshotItem{{
+			Source: "shopify", Handle: "test-product",
+			VariantID: "gid://shopify/ProductVariant/1", Title: "Test product",
+			Quantity: 1, UnitAmountMinor: 1000, RequiresShipping: true,
+		}},
+		Amounts: models.ShopQuoteAmounts{
+			SubtotalAmountMinor: 1000,
+			TotalAmountMinor:    1000,
+		},
+		Customer: models.ShopQuoteCustomer{
+			Name: "Test Buyer", Email: "buyer@example.com",
+		},
+		Shipping: models.ShopQuoteShipping{
+			RecipientName: "Test Buyer", Phone: "91234567",
+			Address1: "1 Test Road", District: "Central and Western",
+			Region: "Hong Kong Island", CountryCode: "HK",
+		},
+		QuotedAt:  quotedAt,
+		ExpiresAt: expiresAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	consumedAt := quotedAt.Add(time.Minute)
+	quote.Status = models.ShopQuoteStatusConsumed
+	quote.ConsumedAt = &consumedAt
+	quote.OrderID = orderID
+	quote.PaymentIntentID = piID
+	if err := db.Create(&quote).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	payload := []byte(fmt.Sprintf(`{
 		"id": "evt_clover_test",
 		"object": "event",
+		"created": %d,
 		"api_version": "2026-02-25.clover",
 		"type": "payment_intent.succeeded",
 		"data": {
 			"object": {
-				"id": "pi_clover_test",
+				"id": %q,
 				"object": "payment_intent",
+				"status": "succeeded",
+				"amount": 1000,
+				"amount_received": 1000,
+				"currency": "hkd",
 				"receipt_email": "buyer@example.com",
 				"metadata": {
+					"pawrd_order_id": %q,
+					"pawrd_quote_id": %q,
+					"pawrd_quote_version": %q,
+					"pawrd_quote_expires_at": %q,
+					"user_id": %q,
 					"customer_name": "Test Buyer",
 					"item_1": "source=shopify | handle=test-product | variant=gid://shopify/ProductVariant/1 | qty:1"
 				}
 			}
 		}
-	}`)
+	}`, quotedAt.Add(2*time.Minute).Unix(), piID, orderID, quoteID, quote.SnapshotSHA256, expiresAt.Format(time.RFC3339Nano), userID))
+	return db, payload
+}
+
+func TestPaymentsWebhookAcceptsNewerCloverEvent(t *testing.T) {
+	const webhookSecret = "whsec_test"
+	db, payload := newSucceededWebhookFixture(t)
 	signed := webhook.GenerateTestSignedPayload(&webhook.UnsignedPayload{
 		Payload: payload,
 		Secret:  webhookSecret,
 	})
-
-	dsn := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "?mode=memory&cache=shared"
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.AutoMigrate(&models.ShopIntegrationEvent{}, &models.ShopOrder{}); err != nil {
-		t.Fatal(err)
-	}
 
 	fulfiller := &recordingFulfiller{}
 	req := httptest.NewRequest(http.MethodPost, "/api/payments/webhook", bytes.NewReader(payload))
@@ -92,333 +209,911 @@ func TestPaymentsWebhookAcceptsNewerCloverEvent(t *testing.T) {
 	}
 }
 
-// ── PaymentIntent lifecycle events (failed / canceled / succeeded snapshot) ──
+func TestPaymentsWebhookRejectsSucceededIntentThatDoesNotMatchSealedOrder(t *testing.T) {
+	const webhookSecret = "whsec_mismatch"
+	tests := []struct {
+		name   string
+		mutate func([]byte) []byte
+	}{
+		{
+			name: "amount",
+			mutate: func(payload []byte) []byte {
+				return bytes.Replace(payload, []byte(`"amount": 1000`), []byte(`"amount": 1`), 1)
+			},
+		},
+		{
+			name: "amount received",
+			mutate: func(payload []byte) []byte {
+				return bytes.Replace(payload, []byte(`"amount_received": 1000`), []byte(`"amount_received": 1`), 1)
+			},
+		},
+		{
+			name: "currency",
+			mutate: func(payload []byte) []byte {
+				return bytes.Replace(payload, []byte(`"currency": "hkd"`), []byte(`"currency": "usd"`), 1)
+			},
+		},
+		{
+			name: "order metadata",
+			mutate: func(payload []byte) []byte {
+				return bytes.Replace(
+					payload,
+					[]byte(`"pawrd_order_id": "11111111-1111-1111-1111-111111111111"`),
+					[]byte(`"pawrd_order_id": "33333333-3333-3333-3333-333333333333"`),
+					1,
+				)
+			},
+		},
+		{
+			name: "quote metadata",
+			mutate: func(payload []byte) []byte {
+				return bytes.Replace(
+					payload,
+					[]byte(`"pawrd_quote_id": "22222222-2222-2222-2222-222222222222"`),
+					[]byte(`"pawrd_quote_id": "33333333-3333-3333-3333-333333333333"`),
+					1,
+				)
+			},
+		},
+		{
+			name: "quote version metadata",
+			mutate: func(payload []byte) []byte {
+				return bytes.Replace(
+					payload,
+					[]byte(`"pawrd_quote_version": "`),
+					[]byte(`"pawrd_quote_version": "tampered-`),
+					1,
+				)
+			},
+		},
+	}
 
-const webhookTestSecret = "whsec_test"
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db, payload := newSucceededWebhookFixture(t)
+			fulfiller := &recordingFulfiller{}
+			rec := serveSignedStripeWebhook(
+				t,
+				db,
+				fulfiller,
+				webhookSecret,
+				test.mutate(payload),
+			)
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("expected mismatch 500, got %d: %s", rec.Code, rec.Body.String())
+			}
+			if fulfiller.called {
+				t.Fatal("mismatched PaymentIntent reached fulfillment")
+			}
+			var integrationEvent models.ShopIntegrationEvent
+			if err := db.First(&integrationEvent, "external_event_id = ?", "evt_clover_test").Error; err != nil {
+				t.Fatal(err)
+			}
+			if integrationEvent.Status != "failed" {
+				t.Fatalf("mismatched event status=%q, want failed", integrationEvent.Status)
+			}
+		})
+	}
+}
 
-func setupWebhookLifecycleDB(t *testing.T, migrateOrders bool) *gorm.DB {
-	t.Helper()
-	dsn := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "?mode=memory&cache=shared"
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+func TestPaymentsWebhookDoesNotFulfillPaymentCompletedAfterQuoteExpiry(t *testing.T) {
+	const webhookSecret = "whsec_expired_quote"
+	db, payload := newSucceededWebhookFixture(t)
+	// The fixture quote expires at 1700000600.
+	payload = bytes.Replace(payload, []byte(`"created": 1700000120`), []byte(`"created": 1700000600`), 1)
+	fulfiller := &recordingFulfiller{}
+	rec := serveSignedStripeWebhook(t, db, fulfiller, webhookSecret, payload)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected expired payment to be acknowledged, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if fulfiller.called {
+		t.Fatal("expired quote payment reached fulfillment")
+	}
+
+	var order models.ShopOrder
+	if err := db.First(&order, "payment_intent_id = ?", "pi_clover_test").Error; err != nil {
+		t.Fatal(err)
+	}
+	if order.Status != "canceled" || order.FinancialStatus != "paid" ||
+		order.FulfillmentStatus != "CANCELLED" ||
+		!strings.Contains(order.FailureReason, "automatic refund queued") {
+		t.Fatalf("expired payment compensation state not recorded: %+v", order)
+	}
+	var refund models.ShopRefund
+	if err := db.First(&refund, "order_id = ?", order.ID).Error; err != nil {
+		t.Fatalf("load automatic compensation refund: %v", err)
+	}
+	if refund.Status != models.ShopRefundStatusPending ||
+		refund.Reason != models.ShopRefundReasonQuoteExpired ||
+		refund.AmountMinor != order.TotalAmountMinor {
+		t.Fatalf("unexpected automatic compensation refund: %+v", refund)
+	}
+	var job models.ShopCompensationRefundJob
+	if err := db.First(&job, "refund_id = ?", refund.ID).Error; err != nil {
+		t.Fatalf("load automatic compensation job: %v", err)
+	}
+	if job.Status != models.ShopCompensationRefundJobPending {
+		t.Fatalf("compensation job status=%q, want pending", job.Status)
+	}
+}
+
+func TestPaymentsWebhookTreatsFractionalExpiryUnixSecondAsExpired(t *testing.T) {
+	const webhookSecret = "whsec_fractional_expiry"
+	db, payload := newSucceededWebhookFixture(t)
+
+	var quote models.ShopCheckoutQuote
+	if err := db.First(&quote, "id = ?", "22222222-2222-2222-2222-222222222222").Error; err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := quote.DecodeAndVerifySnapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	modelsToMigrate := []any{&models.ShopIntegrationEvent{}}
-	if migrateOrders {
-		modelsToMigrate = append(modelsToMigrate, &models.ShopOrder{}, &models.ShopOrderItem{})
-	}
-	if err := db.AutoMigrate(modelsToMigrate...); err != nil {
+	oldVersion := quote.SnapshotSHA256
+	oldExpiry := quote.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	fractionalExpiry := time.Unix(1_700_000_600, 500_000_000).UTC()
+	snapshot.ExpiresAt = fractionalExpiry
+	if err := quote.SetSnapshot(snapshot); err != nil {
 		t.Fatal(err)
 	}
-	return db
+	quote.Status = models.ShopQuoteStatusConsumed
+	if err := db.Model(&models.ShopCheckoutQuote{}).
+		Where("id = ?", quote.ID).
+		Updates(shopQuoteUpdateColumns(quote)).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	payload = bytes.Replace(
+		payload,
+		[]byte(`"created": 1700000120`),
+		[]byte(`"created": 1700000600`),
+		1,
+	)
+	payload = bytes.Replace(payload, []byte(oldVersion), []byte(quote.SnapshotSHA256), 1)
+	payload = bytes.Replace(
+		payload,
+		[]byte(oldExpiry),
+		[]byte(fractionalExpiry.Format(time.RFC3339Nano)),
+		1,
+	)
+
+	fulfiller := &recordingFulfiller{}
+	rec := serveSignedStripeWebhook(t, db, fulfiller, webhookSecret, payload)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fractional-boundary event=%d: %s", rec.Code, rec.Body.String())
+	}
+	if fulfiller.called {
+		t.Fatal("event in the fractional expiry Unix second reached fulfillment")
+	}
+	var refund models.ShopRefund
+	if err := db.First(
+		&refund,
+		"order_id = ? AND reason = ?",
+		"11111111-1111-1111-1111-111111111111",
+		models.ShopRefundReasonQuoteExpired,
+	).Error; err != nil {
+		t.Fatalf("load fractional-boundary compensation: %v", err)
+	}
+	if refund.Status != models.ShopRefundStatusPending || refund.AmountMinor != 1000 {
+		t.Fatalf("unexpected fractional-boundary compensation: %+v", refund)
+	}
+	var job models.ShopCompensationRefundJob
+	if err := db.First(&job, "refund_id = ?", refund.ID).Error; err != nil {
+		t.Fatalf("load fractional-boundary compensation job: %v", err)
+	}
+	if job.Status != models.ShopCompensationRefundJobPending {
+		t.Fatalf("fractional-boundary job status=%q, want pending", job.Status)
+	}
 }
 
-func webhookEventPayload(eventID, eventType, intentID string, extraPIFields string) []byte {
-	return []byte(`{
-		"id": "` + eventID + `",
-		"object": "event",
-		"api_version": "2026-02-25.clover",
-		"type": "` + eventType + `",
-		"data": {
-			"object": {
-				"id": "` + intentID + `",
-				"object": "payment_intent",
-				"metadata": {"item_1": "source=shopify | handle=test-product | variant=gid://shopify/ProductVariant/1 | qty:1"}` + extraPIFields + `
+func TestPaymentsWebhookExpiredSucceededDoesNotRegressFullyRefundedOrder(t *testing.T) {
+	const webhookSecret = "whsec_expired_already_refunded"
+	db, payload := newSucceededWebhookFixture(t)
+	payload = bytes.Replace(payload, []byte(`"created": 1700000120`), []byte(`"created": 1700000601`), 1)
+	if err := db.Model(&models.ShopOrder{}).
+		Where("payment_intent_id = ?", "pi_clover_test").
+		Updates(map[string]any{
+			"status": "refunded", "financial_status": "refunded",
+			"refunded_amount_minor": 1000,
+			"fulfillment_status":    "CANCELLED",
+			"failure_reason":        "refund completed",
+		}).Error; err != nil {
+		t.Fatal(err)
+	}
+	rec := serveSignedStripeWebhook(
+		t, db, &recordingFulfiller{}, webhookSecret, payload,
+	)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("already-refunded expired event=%d: %s", rec.Code, rec.Body.String())
+	}
+	var order models.ShopOrder
+	if err := db.First(&order, "payment_intent_id = ?", "pi_clover_test").Error; err != nil {
+		t.Fatal(err)
+	}
+	if order.Status != "refunded" ||
+		order.FinancialStatus != "refunded" ||
+		order.RefundedAmountMinor != 1000 ||
+		order.FailureReason != "refund completed" {
+		t.Fatalf("expired duplicate regressed refunded order: %+v", order)
+	}
+	var refunds int64
+	if err := db.Model(&models.ShopRefund{}).Count(&refunds).Error; err != nil {
+		t.Fatal(err)
+	}
+	if refunds != 0 {
+		t.Fatalf("fully refunded order created %d extra refunds", refunds)
+	}
+}
+
+func TestPaymentsWebhookExpiredSucceededCompensatesOnlyPartialRefundRemainder(t *testing.T) {
+	const webhookSecret = "whsec_expired_partially_refunded"
+	db, payload := newSucceededWebhookFixture(t)
+	payload = bytes.Replace(payload, []byte(`"created": 1700000120`), []byte(`"created": 1700000601`), 1)
+	var order models.ShopOrder
+	if err := db.First(&order, "payment_intent_id = ?", "pi_clover_test").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&order).Updates(map[string]any{
+		"status": "canceled", "financial_status": "partially_refunded",
+		"refunded_amount_minor": 400, "fulfillment_status": "CANCELLED",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	completedAt := time.Now().UTC()
+	existingStripeRefundID := "re_existing_partial"
+	if err := db.Create(&models.ShopRefund{
+		ID: uuid.NewString(), OrderID: order.ID,
+		PaymentIntentID: order.PaymentIntentIDValue(),
+		StripeRefundID:  &existingStripeRefundID,
+		IdempotencyKey:  "existing-partial",
+		AmountMinor:     400, Currency: "HKD",
+		Reason: "requested_by_customer",
+		Status: models.ShopRefundStatusSucceeded, StripeStatus: "succeeded",
+		RequestedBy: "operator", CompletedAt: &completedAt,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	rec := serveSignedStripeWebhook(
+		t, db, &recordingFulfiller{}, webhookSecret, payload,
+	)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("partially-refunded expired event=%d: %s", rec.Code, rec.Body.String())
+	}
+	var compensation models.ShopRefund
+	if err := db.First(
+		&compensation,
+		"order_id = ? AND reason = ?",
+		order.ID,
+		models.ShopRefundReasonQuoteExpired,
+	).Error; err != nil {
+		t.Fatal(err)
+	}
+	if compensation.AmountMinor != 600 ||
+		compensation.Status != models.ShopRefundStatusPending {
+		t.Fatalf("partial remainder compensation is wrong: %+v", compensation)
+	}
+	if err := db.First(&order, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if order.FinancialStatus != "partially_refunded" {
+		t.Fatalf("partial financial state regressed: %+v", order)
+	}
+}
+
+func TestPaymentsWebhookExpiredSucceededAcknowledgesActiveOrLostDisputeWithoutMutation(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		dispute   string
+		financial string
+		status    string
+	}{
+		{
+			name: "active", dispute: "needs_response",
+			financial: "disputed", status: "payment_disputed",
+		},
+		{
+			name: "lost", dispute: "lost",
+			financial: "dispute_lost", status: "payment_dispute_lost",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, payload := newSucceededWebhookFixture(t)
+			payload = bytes.Replace(
+				payload,
+				[]byte(`"created": 1700000120`),
+				[]byte(`"created": 1700000601`),
+				1,
+			)
+			if err := db.Model(&models.ShopOrder{}).
+				Where("payment_intent_id = ?", "pi_clover_test").
+				Updates(map[string]any{
+					"status": test.status, "financial_status": test.financial,
+					"dispute_id": "dp_expired", "dispute_status": test.dispute,
+					"failure_reason": "dispute owns money lifecycle",
+				}).Error; err != nil {
+				t.Fatal(err)
 			}
-		}
-	}`)
+			rec := serveSignedStripeWebhook(
+				t,
+				db,
+				&recordingFulfiller{},
+				"whsec_expired_dispute_"+test.name,
+				payload,
+			)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expired disputed event=%d: %s", rec.Code, rec.Body.String())
+			}
+			var order models.ShopOrder
+			if err := db.First(&order, "payment_intent_id = ?", "pi_clover_test").Error; err != nil {
+				t.Fatal(err)
+			}
+			if order.Status != test.status ||
+				order.FinancialStatus != test.financial ||
+				order.DisputeStatus != test.dispute ||
+				order.FailureReason != "dispute owns money lifecycle" {
+				t.Fatalf("expired event mutated dispute state: %+v", order)
+			}
+			var refunds int64
+			if err := db.Model(&models.ShopRefund{}).Count(&refunds).Error; err != nil {
+				t.Fatal(err)
+			}
+			if refunds != 0 {
+				t.Fatalf("disputed expired payment created %d refunds", refunds)
+			}
+		})
+	}
 }
 
-func serveWebhookEvent(t *testing.T, db *gorm.DB, fulfiller payments.Fulfiller, payload []byte) *httptest.ResponseRecorder {
-	t.Helper()
-	signed := webhook.GenerateTestSignedPayload(&webhook.UnsignedPayload{
-		Payload: payload,
-		Secret:  webhookTestSecret,
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/payments/webhook", bytes.NewReader(payload))
-	req.Header.Set("Stripe-Signature", signed.Header)
-	rec := httptest.NewRecorder()
-	NewPaymentsWebhookHandler(&config.Config{StripeWebhookSecret: webhookTestSecret}, db, fulfiller).ServeHTTP(rec, req)
-	return rec
+func TestPaymentsWebhookDifferentSucceededEventsReuseOneExpiredPaymentCompensation(t *testing.T) {
+	const webhookSecret = "whsec_expired_quote_duplicate"
+	db, payload := newSucceededWebhookFixture(t)
+	payload = bytes.Replace(payload, []byte(`"created": 1700000120`), []byte(`"created": 1700000601`), 1)
+	fulfiller := &recordingFulfiller{}
+
+	first := serveSignedStripeWebhook(t, db, fulfiller, webhookSecret, payload)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first expired event=%d: %s", first.Code, first.Body.String())
+	}
+	secondPayload := bytes.Replace(
+		payload,
+		[]byte(`"id": "evt_clover_test"`),
+		[]byte(`"id": "evt_clover_test_duplicate"`),
+		1,
+	)
+	second := serveSignedStripeWebhook(t, db, fulfiller, webhookSecret, secondPayload)
+	if second.Code != http.StatusOK {
+		t.Fatalf("duplicate expired event=%d: %s", second.Code, second.Body.String())
+	}
+	if fulfiller.called {
+		t.Fatal("expired duplicate event reached fulfillment")
+	}
+	var refunds, jobs int64
+	if err := db.Model(&models.ShopRefund{}).Count(&refunds).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.ShopCompensationRefundJob{}).Count(&jobs).Error; err != nil {
+		t.Fatal(err)
+	}
+	if refunds != 1 || jobs != 1 {
+		t.Fatalf("duplicate events created refunds/jobs=%d/%d, want 1/1", refunds, jobs)
+	}
 }
 
-func seedWebhookOrder(t *testing.T, db *gorm.DB, intentID, status, financialStatus string) models.ShopOrder {
-	t.Helper()
+func TestPaymentsWebhookTracksDelayedPaymentLifecycleWithoutRegressingPaidOrder(t *testing.T) {
+	const secret = "whsec_lifecycle"
+	db := newPaymentsWebhookTestDB(t)
 	order := models.ShopOrder{
-		ID:               uuid.NewString(),
-		UserID:           "webhook-user",
-		PaymentIntentID:  shopOrderStringPointer(intentID),
-		Status:           status,
-		FinancialStatus:  financialStatus,
-		Currency:         "HKD",
+		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: shopOrderStringPointer("pi_delayed"),
+		Status: "pending_payment", FinancialStatus: "pending", Currency: "HKD",
 		TotalAmountMinor: 1000,
-		CustomerName:     "DB Buyer",
-		CustomerEmail:    "db-buyer@example.com",
-		CustomerPhone:    "+85291112222",
 	}
 	if err := db.Create(&order).Error; err != nil {
-		t.Fatalf("seed order: %v", err)
+		t.Fatal(err)
 	}
-	return order
-}
 
-func TestPaymentsWebhookPaymentFailedMarksOrder(t *testing.T) {
-	db := setupWebhookLifecycleDB(t, true)
-	order := seedWebhookOrder(t, db, "pi_fail_1", "pending_payment", "pending")
-
-	payload := webhookEventPayload("evt_fail_1", "payment_intent.payment_failed", "pi_fail_1",
-		`, "last_payment_error": {"code": "card_declined", "message": "Your card was declined."}`)
-
-	rec := serveWebhookEvent(t, db, &recordingFulfiller{}, payload)
+	processing := []byte(`{
+		"id":"evt_processing","object":"event","api_version":"2026-02-25.clover",
+		"type":"payment_intent.processing",
+		"data":{"object":{"id":"pi_delayed","object":"payment_intent","status":"processing"}}
+	}`)
+	rec := serveSignedStripeWebhook(t, db, &recordingFulfiller{}, secret, processing)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("processing event failed: %d %s", rec.Code, rec.Body.String())
 	}
-
 	var updated models.ShopOrder
 	if err := db.First(&updated, "id = ?", order.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status != "payment_failed" {
-		t.Fatalf("expected payment_failed, got %q", updated.Status)
-	}
-	if updated.FinancialStatus != "failed" {
-		t.Fatalf("expected financial_status failed, got %q", updated.FinancialStatus)
-	}
-	if updated.FailureReason != "card_declined: Your card was declined." {
-		t.Fatalf("unexpected failure reason: %q", updated.FailureReason)
+	if updated.Status != "payment_processing" || updated.FinancialStatus != "pending" {
+		t.Fatalf("processing state not applied: %+v", updated)
 	}
 
-	// Replay of the same event is a no-op (integration event already completed).
-	order.Status = "pending_payment"
-	replay := serveWebhookEvent(t, db, &recordingFulfiller{}, webhookEventPayload("evt_fail_1", "payment_intent.payment_failed", "pi_fail_1",
-		`, "last_payment_error": {"code": "card_declined", "message": "Your card was declined."}`))
-	if replay.Code != http.StatusOK {
-		t.Fatalf("replay: expected 200, got %d", replay.Code)
+	failed := []byte(`{
+		"id":"evt_failed","object":"event","api_version":"2026-02-25.clover",
+		"type":"payment_intent.payment_failed",
+		"data":{"object":{"id":"pi_delayed","object":"payment_intent","status":"requires_payment_method",
+			"last_payment_error":{"message":"card declined"}}}
+	}`)
+	rec = serveSignedStripeWebhook(t, db, &recordingFulfiller{}, secret, failed)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("failed event failed: %d %s", rec.Code, rec.Body.String())
 	}
 	if err := db.First(&updated, "id = ?", order.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status != "payment_failed" {
-		t.Fatalf("replay must not change state, got %q", updated.Status)
+	if updated.Status != "payment_failed" || updated.FailureReason != "card declined" {
+		t.Fatalf("payment failure state not applied: %+v", updated)
 	}
-}
 
-func TestPaymentsWebhookFailedAfterSucceededDoesNotRegress(t *testing.T) {
-	db := setupWebhookLifecycleDB(t, true)
-	order := seedWebhookOrder(t, db, "pi_paid_1", "paid", "paid")
-
-	rec := serveWebhookEvent(t, db, &recordingFulfiller{}, webhookEventPayload("evt_fail_after_paid", "payment_intent.payment_failed", "pi_paid_1",
-		`, "last_payment_error": {"code": "card_declined", "message": "late failure"}`))
+	canceled := []byte(`{
+		"id":"evt_canceled","object":"event","api_version":"2026-02-25.clover",
+		"type":"payment_intent.canceled",
+		"data":{"object":{"id":"pi_delayed","object":"payment_intent","status":"canceled",
+			"cancellation_reason":"abandoned"}}
+	}`)
+	rec = serveSignedStripeWebhook(t, db, &recordingFulfiller{}, secret, canceled)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("canceled event failed: %d %s", rec.Code, rec.Body.String())
 	}
-
-	var updated models.ShopOrder
 	if err := db.First(&updated, "id = ?", order.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status != "paid" {
-		t.Fatalf("paid order must not regress, got %q", updated.Status)
+	if updated.Status != "payment_canceled" || updated.FinancialStatus != "voided" {
+		t.Fatalf("payment cancel state not applied: %+v", updated)
 	}
-	if updated.FinancialStatus != "paid" {
-		t.Fatalf("financial_status must not regress, got %q", updated.FinancialStatus)
-	}
-	if updated.FailureReason == "card_declined: late failure" {
-		t.Fatalf("failure reason must not overwrite a paid order")
-	}
-}
 
-func TestPaymentsWebhookCanceledMarksOrder(t *testing.T) {
-	db := setupWebhookLifecycleDB(t, true)
-	order := seedWebhookOrder(t, db, "pi_cancel_1", "pending_payment", "pending")
-
-	rec := serveWebhookEvent(t, db, &recordingFulfiller{}, webhookEventPayload("evt_cancel_1", "payment_intent.canceled", "pi_cancel_1", ""))
+	if err := db.Model(&updated).Updates(map[string]any{
+		"status": "processing", "financial_status": "paid", "failure_reason": "",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	lateProcessing := bytes.Replace(processing, []byte("evt_processing"), []byte("evt_processing_late"), 1)
+	rec = serveSignedStripeWebhook(t, db, &recordingFulfiller{}, secret, lateProcessing)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("late processing event failed: %d %s", rec.Code, rec.Body.String())
 	}
-
-	var updated models.ShopOrder
 	if err := db.First(&updated, "id = ?", order.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status != "canceled" {
-		t.Fatalf("expected canceled, got %q", updated.Status)
-	}
-	if updated.FinancialStatus != "voided" {
-		t.Fatalf("expected financial_status voided, got %q", updated.FinancialStatus)
-	}
-
-	// Replay is a no-op.
-	replay := serveWebhookEvent(t, db, &recordingFulfiller{}, webhookEventPayload("evt_cancel_1", "payment_intent.canceled", "pi_cancel_1", ""))
-	if replay.Code != http.StatusOK {
-		t.Fatalf("replay: expected 200, got %d", replay.Code)
+	if updated.Status != "processing" || updated.FinancialStatus != "paid" {
+		t.Fatalf("late processing event regressed paid order: %+v", updated)
 	}
 }
 
-func TestPaymentsWebhookCanceledAfterPaidDoesNotRegress(t *testing.T) {
-	db := setupWebhookLifecycleDB(t, true)
-	order := seedWebhookOrder(t, db, "pi_paid_2", "processing", "paid")
-
-	rec := serveWebhookEvent(t, db, &recordingFulfiller{}, webhookEventPayload("evt_cancel_after_paid", "payment_intent.canceled", "pi_paid_2", ""))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
-	}
-
-	var updated models.ShopOrder
-	if err := db.First(&updated, "id = ?", order.ID).Error; err != nil {
+func TestPaymentsWebhookSucceededRecoversEarlierPaymentFailureIntoDurableFulfillment(t *testing.T) {
+	const secret = "whsec_failed_then_succeeded"
+	db, payload := newSucceededWebhookFixture(t)
+	if err := db.Model(&models.ShopOrder{}).
+		Where("payment_intent_id = ?", "pi_clover_test").
+		Updates(map[string]any{
+			"status": "payment_failed", "financial_status": "pending",
+			"failure_reason": "card was retried",
+		}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status != "processing" {
-		t.Fatalf("processing order must not regress, got %q", updated.Status)
-	}
-	if updated.FinancialStatus != "paid" {
-		t.Fatalf("financial_status must not regress, got %q", updated.FinancialStatus)
-	}
-}
-
-func TestPaymentsWebhookSucceededUsesOrderSnapshot(t *testing.T) {
-	db := setupWebhookLifecycleDB(t, true)
-	seedWebhookOrder(t, db, "pi_snap_1", "pending_payment", "pending")
-
-	// Metadata carries conflicting client-era PII; the order snapshot must win.
-	fulfiller := &recordingFulfiller{}
-	rec := serveWebhookEvent(t, db, fulfiller, []byte(`{
-		"id": "evt_snap_1",
-		"object": "event",
-		"api_version": "2026-02-25.clover",
-		"type": "payment_intent.succeeded",
-		"data": {
-			"object": {
-				"id": "pi_snap_1",
-				"object": "payment_intent",
-				"receipt_email": "receipt@example.com",
-				"metadata": {
-					"customer_name": "Metadata Name",
-					"customer_phone": "0000",
-					"item_1": "source=shopify | handle=test-product | variant=gid://shopify/ProductVariant/1 | qty:1"
-				}
-			}
-		}
-	}`))
+	downstream := &recordingFulfiller{}
+	queue := payments.NewDurableFulfillmentQueue(db, downstream)
+	rec := serveSignedStripeWebhook(t, db, queue, secret, payload)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("succeeded recovery failed: %d %s", rec.Code, rec.Body.String())
 	}
-	if !fulfiller.called {
-		t.Fatalf("fulfillment was not dispatched")
+	if downstream.called {
+		t.Fatal("Stripe webhook synchronously called downstream fulfillment")
 	}
-	if fulfiller.request.CustomerName != "DB Buyer" ||
-		fulfiller.request.CustomerEmail != "db-buyer@example.com" ||
-		fulfiller.request.CustomerPhone != "+85291112222" {
-		t.Fatalf("fulfillment must use the order snapshot, got %+v", fulfiller.request)
+	if processed, err := queue.ProcessPending(context.Background(), 1); err != nil || processed != 1 {
+		t.Fatalf("process recovered fulfillment=%d err=%v", processed, err)
 	}
-}
-
-func TestPaymentsWebhookOrderLookupDBErrorReturns500(t *testing.T) {
-	// No shop_orders table → the order lookup hits a REAL DB error → 500 so
-	// Stripe retries.
-	db := setupWebhookLifecycleDB(t, false)
-
-	rec := serveWebhookEvent(t, db, &recordingFulfiller{}, webhookEventPayload("evt_dberr_1", "payment_intent.succeeded", "pi_dberr_1", ""))
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500, got %d body=%s", rec.Code, rec.Body.String())
+	if !downstream.called {
+		t.Fatal("payment_failed -> succeeded did not reach durable fulfillment")
+	}
+	var order models.ShopOrder
+	if err := db.First(&order, "payment_intent_id = ?", "pi_clover_test").Error; err != nil {
+		t.Fatal(err)
+	}
+	if order.FinancialStatus != "paid" ||
+		order.Status != "fulfillment_pending" {
+		t.Fatalf("failed payment state was not recovered: %+v", order)
 	}
 }
 
-func TestPaymentsWebhookFindsOrderByMetadataWhenBackfillMissing(t *testing.T) {
-	db := setupWebhookLifecycleDB(t, true)
-	// Order without a back-filled intent id — only the pawrd_order_id metadata
-	// links the intent to the order.
+func TestPaymentsWebhookTracksDisputeAndRestoresWonPayment(t *testing.T) {
+	const secret = "whsec_dispute"
+	db := newPaymentsWebhookTestDB(t)
 	order := models.ShopOrder{
-		ID: uuid.NewString(), UserID: "webhook-user", PaymentIntentID: nil,
-		Status: "pending_payment", Currency: "HKD", TotalAmountMinor: 1000,
-		CustomerName: "Reconciled Buyer", CustomerEmail: "reconciled@example.com",
+		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: shopOrderStringPointer("pi_dispute"),
+		Status: "processing", FinancialStatus: "paid", Currency: "HKD",
+		TotalAmountMinor: 2500,
 	}
 	if err := db.Create(&order).Error; err != nil {
-		t.Fatalf("seed order: %v", err)
+		t.Fatal(err)
 	}
 
-	fulfiller := &recordingFulfiller{}
-	rec := serveWebhookEvent(t, db, fulfiller, []byte(`{
-		"id": "evt_reconcile_1",
-		"object": "event",
-		"api_version": "2026-02-25.clover",
-		"type": "payment_intent.succeeded",
-		"data": {
-			"object": {
-				"id": "pi_reconcile_1",
-				"object": "payment_intent",
-				"metadata": {
-					"pawrd_order_id": "`+order.ID+`",
-					"item_1": "source=shopify | handle=test-product | variant=gid://shopify/ProductVariant/1 | qty:1"
-				}
-			}
-		}
-	}`))
+	created := []byte(`{
+		"id":"evt_dispute_created","object":"event","api_version":"2026-02-25.clover",
+		"type":"charge.dispute.created",
+		"data":{"object":{"id":"dp_1","object":"dispute","amount":2500,"currency":"hkd",
+			"payment_intent":"pi_dispute","reason":"unrecognized","status":"needs_response"}}
+	}`)
+	rec := serveSignedStripeWebhook(t, db, &recordingFulfiller{}, secret, created)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("dispute created failed: %d %s", rec.Code, rec.Body.String())
 	}
-	if !fulfiller.called || fulfiller.request.CustomerName != "Reconciled Buyer" {
-		t.Fatalf("expected order found via metadata, got %+v", fulfiller.request)
-	}
-
-	// The reconciliation gap is closed: the intent id is back-filled.
 	var updated models.ShopOrder
 	if err := db.First(&updated, "id = ?", order.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if updated.PaymentIntentIDValue() != "pi_reconcile_1" {
-		t.Fatalf("expected back-filled intent id, got %q", updated.PaymentIntentIDValue())
+	if updated.FinancialStatus != "disputed" || updated.Status != "payment_disputed" ||
+		updated.DisputeID != "dp_1" || updated.DisputedAmountMinor != 2500 {
+		t.Fatalf("dispute state not applied: %+v", updated)
+	}
+
+	lateProcessing := []byte(`{
+		"id":"evt_dispute_late_processing","object":"event","api_version":"2026-02-25.clover",
+		"type":"payment_intent.processing",
+		"data":{"object":{"id":"pi_dispute","object":"payment_intent","status":"processing"}}
+	}`)
+	rec = serveSignedStripeWebhook(t, db, &recordingFulfiller{}, secret, lateProcessing)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("late processing after dispute failed: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := db.First(&updated, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if updated.FinancialStatus != "disputed" ||
+		updated.Status != "payment_disputed" ||
+		updated.DisputeStatus != "needs_response" {
+		t.Fatalf("late processing regressed disputed order: %+v", updated)
+	}
+
+	won := []byte(`{
+		"id":"evt_dispute_won","object":"event","api_version":"2026-02-25.clover",
+		"type":"charge.dispute.closed",
+		"data":{"object":{"id":"dp_1","object":"dispute","amount":2500,"currency":"hkd",
+			"payment_intent":"pi_dispute","reason":"unrecognized","status":"won"}}
+	}`)
+	rec = serveSignedStripeWebhook(t, db, &recordingFulfiller{}, secret, won)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dispute won failed: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := db.First(&updated, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if updated.FinancialStatus != "paid" || updated.Status != "processing" ||
+		updated.DisputeStatus != "won" {
+		t.Fatalf("won dispute did not restore payment: %+v", updated)
 	}
 }
 
-func TestTerminalOrderStatesAreConsistentInOrdersAPI(t *testing.T) {
-	db := setupWebhookLifecycleDB(t, true)
-	failed := seedWebhookOrder(t, db, "pi_api_fail", "pending_payment", "pending")
-	canceled := seedWebhookOrder(t, db, "pi_api_cancel", "pending_payment", "pending")
-
-	serveWebhookEvent(t, db, &recordingFulfiller{}, webhookEventPayload("evt_api_fail", "payment_intent.payment_failed", "pi_api_fail",
-		`, "last_payment_error": {"code": "card_declined", "message": "declined"}`))
-	serveWebhookEvent(t, db, &recordingFulfiller{}, webhookEventPayload("evt_api_cancel", "payment_intent.canceled", "pi_api_cancel", ""))
-
-	token, err := auth.GenerateToken("webhook-user", "webhook@example.com", "Webhook User")
-	if err != nil {
-		t.Fatalf("token: %v", err)
+func TestPaymentsWebhookRestoresPartialRefundAfterWonDispute(t *testing.T) {
+	db := newPaymentsWebhookTestDB(t)
+	order := models.ShopOrder{
+		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: shopOrderStringPointer("pi_partial_dispute"),
+		Status: "payment_disputed", FinancialStatus: "disputed", Currency: "HKD",
+		TotalAmountMinor: 1000, RefundedAmountMinor: 400,
+		DisputeID: "dp_partial", DisputeStatus: "needs_response",
 	}
-	req := httptest.NewRequest(http.MethodGet, "/api/shop/orders", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	rec := httptest.NewRecorder()
-	NewShopOrdersHandler(db).ServeHTTP(rec, req)
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	dispute := stripe.Dispute{
+		ID: "dp_partial", Amount: 600, Currency: stripe.CurrencyHKD,
+		Status:        stripe.DisputeStatusWon,
+		PaymentIntent: &stripe.PaymentIntent{ID: order.PaymentIntentIDValue()},
+	}
+	if err := applyStripeDisputeWebhook(db, dispute, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&order, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if order.FinancialStatus != "partially_refunded" || order.Status != "processing" {
+		t.Fatalf("won dispute lost partial refund state: %+v", order)
+	}
+}
+
+func TestStripeDisputeTerminalStateDoesNotRegressOnOlderActiveEvent(t *testing.T) {
+	db := newPaymentsWebhookTestDB(t)
+	order := models.ShopOrder{
+		ID: uuid.NewString(), UserID: "user-1",
+		PaymentIntentID: shopOrderStringPointer("pi_dispute_monotonic"),
+		Status:          "payment_disputed", FinancialStatus: "disputed",
+		Currency: "HKD", TotalAmountMinor: 1000,
+		DisputeID: "dp_monotonic", DisputeStatus: "needs_response",
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	won := stripe.Dispute{
+		ID: "dp_monotonic", Amount: 1000, Currency: stripe.CurrencyHKD,
+		Status:        stripe.DisputeStatusWon,
+		PaymentIntent: &stripe.PaymentIntent{ID: order.PaymentIntentIDValue()},
+	}
+	if err := applyStripeDisputeWebhook(db, won, 200); err != nil {
+		t.Fatal(err)
+	}
+	olderActive := won
+	olderActive.Status = stripe.DisputeStatusNeedsResponse
+	if err := applyStripeDisputeWebhook(db, olderActive, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&order, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if order.DisputeStatus != "won" ||
+		order.FinancialStatus != "paid" ||
+		order.Status != "processing" ||
+		order.DisputeEventCreated != 200 {
+		t.Fatalf("older dispute event regressed terminal state: %+v", order)
+	}
+}
+
+func TestStripeDisputeTerminalStateRejectsConflictingTerminalSnapshots(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		existingCreated int64
+		incomingCreated int64
+	}{
+		{name: "legacy timestamps missing"},
+		{name: "same timestamp", existingCreated: 200, incomingCreated: 200},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db := newPaymentsWebhookTestDB(t)
+			order := models.ShopOrder{
+				ID: uuid.NewString(), UserID: "user-1",
+				PaymentIntentID: shopOrderStringPointer("pi_dispute_terminal_" + test.name),
+				Status:          "processing", FinancialStatus: "paid",
+				Currency: "HKD", TotalAmountMinor: 1000,
+				DisputeID: "dp_terminal", DisputeStatus: "won",
+				DisputeEventCreated: test.existingCreated,
+			}
+			if err := db.Create(&order).Error; err != nil {
+				t.Fatal(err)
+			}
+			conflicting := stripe.Dispute{
+				ID: "dp_terminal", Amount: 1000, Currency: stripe.CurrencyHKD,
+				Status:        stripe.DisputeStatusLost,
+				PaymentIntent: &stripe.PaymentIntent{ID: order.PaymentIntentIDValue()},
+			}
+			if err := applyStripeDisputeWebhook(
+				db,
+				conflicting,
+				test.incomingCreated,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.First(&order, "id = ?", order.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if order.DisputeStatus != "won" ||
+				order.FinancialStatus != "paid" ||
+				order.Status != "processing" {
+				t.Fatalf("conflicting terminal dispute regressed state: %+v", order)
+			}
+		})
+	}
+}
+
+func TestPaymentsWebhookAppliesPartialAndFailedRefundByRefundAndPaymentIntentID(t *testing.T) {
+	const secret = "whsec_refund"
+	db := newPaymentsWebhookTestDB(t)
+	order := models.ShopOrder{
+		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: shopOrderStringPointer("pi_refund"),
+		Status: "return_closed", FinancialStatus: "paid", Currency: "HKD",
+		TotalAmountMinor: 1000, ReturnStatus: "CLOSED",
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	pending := models.ShopRefund{
+		ID: uuid.NewString(), OrderID: order.ID, PaymentIntentID: order.PaymentIntentIDValue(),
+		IdempotencyKey: "refund-one", AmountMinor: 400, Currency: "HKD",
+		Reason: "requested_by_customer", Status: models.ShopRefundStatusPending,
+		RequestedBy: "operator",
+	}
+	if err := db.Create(&pending).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	succeeded := []byte(`{
+		"id":"evt_refund_succeeded","object":"event","api_version":"2026-02-25.clover",
+		"type":"refund.created",
+		"data":{"object":{"id":"re_partial","object":"refund","amount":400,"currency":"hkd",
+			"payment_intent":"pi_refund","reason":"requested_by_customer","status":"succeeded",
+			"metadata":{"pawrd_refund_id":"` + pending.ID + `"}}}
+	}`)
+	mirror := &recordingRefundMirrorEnqueuer{}
+	rec := serveSignedStripeWebhook(t, db, &recordingFulfiller{}, secret, succeeded, mirror)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("refund succeeded event failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var updatedOrder models.ShopOrder
+	if err := db.First(&updatedOrder, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if updatedOrder.RefundedAmountMinor != 400 ||
+		updatedOrder.FinancialStatus != "partially_refunded" ||
+		updatedOrder.Status != "return_closed" {
+		t.Fatalf("partial refund misclassified the order: %+v", updatedOrder)
+	}
+	var updatedRefund models.ShopRefund
+	if err := db.First(&updatedRefund, "id = ?", pending.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if updatedRefund.Status != models.ShopRefundStatusSucceeded ||
+		updatedRefund.StripeRefundID == nil || *updatedRefund.StripeRefundID != "re_partial" {
+		t.Fatalf("refund record not reconciled: %+v", updatedRefund)
+	}
+	if len(mirror.refundIDs) != 1 || mirror.refundIDs[0] != pending.ID {
+		t.Fatalf("succeeded refund was not queued for Shopify mirror: %#v", mirror.refundIDs)
 	}
 
-	var payload struct {
-		Orders []struct {
-			ID              string `json:"id"`
-			Status          string `json:"status"`
-			FinancialStatus string `json:"financialStatus"`
-		} `json:"orders"`
+	failing := models.ShopRefund{
+		ID: uuid.NewString(), OrderID: order.ID, PaymentIntentID: order.PaymentIntentIDValue(),
+		IdempotencyKey: "refund-two", AmountMinor: 300, Currency: "HKD",
+		Reason: "requested_by_customer", Status: models.ShopRefundStatusPending,
+		RequestedBy: "operator",
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode response: %v", err)
+	if err := db.Create(&failing).Error; err != nil {
+		t.Fatal(err)
+	}
+	failed := []byte(`{
+		"id":"evt_refund_failed","object":"event","api_version":"2026-02-25.clover",
+		"type":"refund.failed",
+		"data":{"object":{"id":"re_failed","object":"refund","amount":300,"currency":"hkd",
+			"payment_intent":"pi_refund","reason":"requested_by_customer","status":"failed",
+			"failure_reason":"declined","metadata":{"pawrd_refund_id":"` + failing.ID + `"}}}
+	}`)
+	rec = serveSignedStripeWebhook(t, db, &recordingFulfiller{}, secret, failed)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refund failed event failed: %d %s", rec.Code, rec.Body.String())
+	}
+	updatedRefund = models.ShopRefund{}
+	if err := db.First(&updatedRefund, "id = ?", failing.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if updatedRefund.Status != models.ShopRefundStatusFailed || updatedRefund.FailureReason != "declined" {
+		t.Fatalf("failed refund not persisted: %+v", updatedRefund)
+	}
+	if err := db.First(&updatedOrder, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if updatedOrder.RefundedAmountMinor != 400 || updatedOrder.FinancialStatus != "partially_refunded" {
+		t.Fatalf("failed refund changed money state: %+v", updatedOrder)
+	}
+}
+
+func TestChargeRefundedUsesCumulativeAmountAndDoesNotMarkPartialAsFull(t *testing.T) {
+	const secret = "whsec_charge_refund"
+	db := newPaymentsWebhookTestDB(t)
+	order := models.ShopOrder{
+		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: shopOrderStringPointer("pi_charge_partial"),
+		Status: "return_closed", FinancialStatus: "paid", Currency: "HKD",
+		TotalAmountMinor: 1000, ReturnStatus: "CLOSED",
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
 	}
 
-	expected := map[string][2]string{
-		failed.ID:   {"payment_failed", "failed"},
-		canceled.ID: {"canceled", "voided"},
+	partial := []byte(`{
+		"id":"evt_charge_partial","object":"event","api_version":"2026-02-25.clover",
+		"type":"charge.refunded",
+		"data":{"object":{"id":"ch_partial","object":"charge","amount":1000,
+			"amount_refunded":400,"currency":"hkd","payment_intent":"pi_charge_partial",
+			"refunded":false}}
+	}`)
+	rec := serveSignedStripeWebhook(t, db, &recordingFulfiller{}, secret, partial)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("partial charge refund failed: %d %s", rec.Code, rec.Body.String())
 	}
-	seen := 0
-	for _, o := range payload.Orders {
-		want, ok := expected[o.ID]
-		if !ok {
-			continue
-		}
-		seen++
-		if o.Status != want[0] || o.FinancialStatus != want[1] {
-			t.Fatalf("order %s: expected (%s, %s), got (%s, %s)", o.ID, want[0], want[1], o.Status, o.FinancialStatus)
-		}
+	var updated models.ShopOrder
+	if err := db.First(&updated, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
 	}
-	if seen != 2 {
-		t.Fatalf("expected both terminal orders in API payload, saw %d", seen)
+	if updated.RefundedAmountMinor != 400 ||
+		updated.FinancialStatus != "partially_refunded" ||
+		updated.Status != "return_closed" {
+		t.Fatalf("charge partial refund was marked as full: %+v", updated)
+	}
+
+	full := bytes.Replace(partial, []byte("evt_charge_partial"), []byte("evt_charge_full"), 1)
+	full = bytes.Replace(full, []byte(`"amount_refunded":400`), []byte(`"amount_refunded":1000`), 1)
+	full = bytes.Replace(full, []byte(`"refunded":false`), []byte(`"refunded":true`), 1)
+	rec = serveSignedStripeWebhook(t, db, &recordingFulfiller{}, secret, full)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("full charge refund failed: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := db.First(&updated, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if updated.RefundedAmountMinor != 1000 ||
+		updated.FinancialStatus != "refunded" ||
+		updated.Status != "refunded" {
+		t.Fatalf("charge full refund not applied: %+v", updated)
+	}
+
+	olderPartial := bytes.Replace(
+		partial,
+		[]byte("evt_charge_partial"),
+		[]byte("evt_charge_partial_late"),
+		1,
+	)
+	rec = serveSignedStripeWebhook(t, db, &recordingFulfiller{}, secret, olderPartial)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("late partial charge refund failed: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := db.First(&updated, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if updated.RefundedAmountMinor != 1000 ||
+		updated.FinancialStatus != "refunded" ||
+		updated.Status != "refunded" {
+		t.Fatalf("older partial charge refund regressed full refund: %+v", updated)
+	}
+}
+
+func TestStripeRefundTerminalStateDoesNotRegressOnOlderEvents(t *testing.T) {
+	db := newPaymentsWebhookTestDB(t)
+	order := models.ShopOrder{
+		ID: uuid.NewString(), UserID: "user-1",
+		PaymentIntentID: shopOrderStringPointer("pi_refund_monotonic"),
+		Status:          "return_closed", FinancialStatus: "paid",
+		Currency: "HKD", TotalAmountMinor: 1000, ReturnStatus: "CLOSED",
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	refund := models.ShopRefund{
+		ID: uuid.NewString(), OrderID: order.ID,
+		PaymentIntentID: order.PaymentIntentIDValue(),
+		IdempotencyKey:  "refund-monotonic", AmountMinor: 400,
+		Currency: "HKD", Reason: "requested_by_customer",
+		Status: models.ShopRefundStatusPending, RequestedBy: "operator",
+	}
+	if err := db.Create(&refund).Error; err != nil {
+		t.Fatal(err)
+	}
+	stripeRefund := stripe.Refund{
+		ID: "re_monotonic", Amount: 400, Currency: stripe.CurrencyHKD,
+		PaymentIntent: &stripe.PaymentIntent{ID: order.PaymentIntentIDValue()},
+		Status:        stripe.RefundStatusFailed,
+		Metadata:      map[string]string{"pawrd_refund_id": refund.ID},
+	}
+	if err := applyStripeRefundWebhook(
+		db, nil, stripe.EventTypeRefundFailed, stripeRefund, "", 200,
+	); err != nil {
+		t.Fatal(err)
+	}
+	stripeRefund.Status = stripe.RefundStatusPending
+	if err := applyStripeRefundWebhook(
+		db, nil, stripe.EventTypeRefundUpdated, stripeRefund, "", 100,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&refund, "id = ?", refund.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if refund.Status != models.ShopRefundStatusFailed ||
+		refund.StripeEventCreated != 200 {
+		t.Fatalf("older pending event regressed failed refund: %+v", refund)
+	}
+
+	stripeRefund.Status = stripe.RefundStatusSucceeded
+	if err := applyStripeRefundWebhook(
+		db, nil, stripe.EventTypeRefundUpdated, stripeRefund, "", 300,
+	); err != nil {
+		t.Fatal(err)
+	}
+	stripeRefund.Status = stripe.RefundStatusFailed
+	if err := applyStripeRefundWebhook(
+		db, nil, stripe.EventTypeRefundFailed, stripeRefund, "", 250,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&refund, "id = ?", refund.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if refund.Status != models.ShopRefundStatusSucceeded ||
+		refund.StripeEventCreated != 300 {
+		t.Fatalf("older failed event regressed succeeded refund: %+v", refund)
 	}
 }

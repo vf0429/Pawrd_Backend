@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
@@ -16,28 +18,42 @@ import (
 )
 
 type AdminOrderLineInput struct {
-	VariantID string
-	Quantity  int
+	VariantID        string
+	Quantity         int
+	RequiresShipping bool
+	UnitPrice        string
 }
 
 type AdminOrderInput struct {
-	Currency        string
-	CustomerEmail   string
-	CustomerPhone   string
-	ShippingName    string
-	ShippingPhone   string
-	ShippingAddress string
-	ShippingCity    string
-	ShippingRegion  string
-	Amount          string
-	PaymentID       string
-	Lines           []AdminOrderLineInput
+	Currency           string
+	CustomerEmail      string
+	CustomerPhone      string
+	ShippingName       string
+	ShippingPhone      string
+	ShippingAddress    string
+	ShippingCity       string
+	ShippingRegion     string
+	Amount             string
+	PaymentID          string
+	QuoteID            string
+	ShippingTitle      string
+	ShippingCode       string
+	ShippingAmount     string
+	DiscountCode       string
+	DiscountAmount     string
+	DiscountTargetType string
+	TaxTitle           string
+	TaxAmount          string
+	TaxRate            string
+	Lines              []AdminOrderLineInput
 }
 
 type AdminOrderResult struct {
 	ID          string
 	LegacyID    string
 	Name        string
+	TotalAmount string
+	Currency    string
 	LineItemIDs []string
 }
 
@@ -63,10 +79,23 @@ type AdminOrderClient interface {
 	RequestReturn(context.Context, string, string, string) (*AdminReturnResult, error)
 }
 
+// AdminOrderLookupClient supports idempotency recovery when Shopify accepted
+// orderCreate but the local database update failed. Callers should look up the
+// Stripe PaymentIntent source identifier before attempting another create.
+type AdminOrderLookupClient interface {
+	FindOrderBySourceIdentifier(context.Context, string) (*AdminOrderResult, error)
+}
+
+// ErrOrderCreateRejected means Shopify definitively returned a mutation
+// userError. Callers must still repeat the sourceIdentifier lookup before
+// compensating a captured payment.
+var ErrOrderCreateRejected = errors.New("Shopify orderCreate was rejected")
+
 var requiredWebhookTopics = []string{
 	"FULFILLMENTS_CREATE",
 	"FULFILLMENTS_UPDATE",
 	"ORDERS_FULFILLED",
+	"ORDERS_CANCELLED",
 	"RETURNS_REQUEST",
 	"RETURNS_APPROVE",
 	"RETURNS_DECLINE",
@@ -335,17 +364,43 @@ func (c *AdminClient) ensureWebhookSubscriptions(ctx context.Context, callbackUR
 }
 
 func (c *AdminClient) CreateOrder(ctx context.Context, input AdminOrderInput) (*AdminOrderResult, error) {
+	currency := strings.ToUpper(strings.TrimSpace(input.Currency))
+	if currency == "" {
+		return nil, fmt.Errorf("shopify order currency is required")
+	}
+	if strings.TrimSpace(input.Amount) == "" {
+		return nil, fmt.Errorf("shopify order amount is required")
+	}
+	if err := validateSourceIdentifier(input.PaymentID); err != nil {
+		return nil, err
+	}
+	if len(input.Lines) == 0 {
+		return nil, fmt.Errorf("shopify order requires at least one line")
+	}
+
 	lines := make([]map[string]any, 0, len(input.Lines))
 	for _, line := range input.Lines {
-		lines = append(lines, map[string]any{"variantId": line.VariantID, "quantity": line.Quantity})
+		variantID := strings.TrimSpace(line.VariantID)
+		if !strings.HasPrefix(variantID, "gid://shopify/ProductVariant/") || line.Quantity <= 0 {
+			return nil, fmt.Errorf("shopify order contains an invalid line")
+		}
+		payload := map[string]any{
+			"variantId":        variantID,
+			"quantity":         line.Quantity,
+			"requiresShipping": line.RequiresShipping,
+		}
+		if unitPrice := strings.TrimSpace(line.UnitPrice); unitPrice != "" {
+			payload["priceSet"] = adminMoneyBag(unitPrice, currency)
+		}
+		lines = append(lines, payload)
 	}
 	order := map[string]any{
-		"currency":         strings.ToUpper(input.Currency),
+		"currency":         currency,
 		"email":            input.CustomerEmail,
 		"phone":            input.CustomerPhone,
 		"financialStatus":  "PAID",
 		"lineItems":        lines,
-		"sourceIdentifier": input.PaymentID,
+		"sourceIdentifier": strings.TrimSpace(input.PaymentID),
 		"shippingAddress": map[string]any{
 			"firstName":   input.ShippingName,
 			"phone":       input.ShippingPhone,
@@ -356,13 +411,84 @@ func (c *AdminClient) CreateOrder(ctx context.Context, input AdminOrderInput) (*
 		},
 		"tags": []string{"Pawrd", "Stripe"},
 		"transactions": []map[string]any{{
-			"amountSet": map[string]any{"shopMoney": map[string]any{"amount": input.Amount, "currencyCode": strings.ToUpper(input.Currency)}},
+			"amountSet": adminMoneyBag(strings.TrimSpace(input.Amount), currency),
 			"gateway":   "Stripe", "kind": "SALE", "status": "SUCCESS",
 		}},
 	}
-	const mutation = `mutation CreatePawrdOrder($order: OrderCreateOrderInput!) {
-	  orderCreate(order: $order) {
-	    order { id legacyResourceId name lineItems(first: 100) { nodes { id } } }
+	customAttributes := make([]map[string]any, 0, 2)
+	if quoteID := strings.TrimSpace(input.QuoteID); quoteID != "" {
+		customAttributes = append(customAttributes, map[string]any{
+			"key": "Pawrd quote ID", "value": quoteID,
+		})
+	}
+	if shippingTitle := strings.TrimSpace(input.ShippingTitle); shippingTitle != "" {
+		shippingLine := map[string]any{
+			"title":    shippingTitle,
+			"priceSet": adminMoneyBag(defaultMoney(input.ShippingAmount), currency),
+			"source":   "Shopify Storefront",
+		}
+		if shippingCode := strings.TrimSpace(input.ShippingCode); shippingCode != "" {
+			shippingLine["code"] = shippingCode
+		}
+		order["shippingLines"] = []map[string]any{shippingLine}
+	}
+	if discountCode := strings.TrimSpace(input.DiscountCode); discountCode != "" {
+		switch strings.ToUpper(strings.TrimSpace(input.DiscountTargetType)) {
+		case "SHIPPING_LINE":
+			if sameAdminMoney(input.DiscountAmount, input.ShippingAmount) {
+				order["discountCode"] = map[string]any{
+					"freeShippingDiscountCode": map[string]any{"code": discountCode},
+				}
+			} else {
+				order["discountCode"] = map[string]any{
+					"itemFixedDiscountCode": map[string]any{
+						"amountSet": adminMoneyBag(defaultMoney(input.DiscountAmount), currency),
+						"code":      discountCode,
+					},
+				}
+				customAttributes = append(customAttributes, map[string]any{
+					"key": "Pawrd original discount target", "value": "SHIPPING_LINE",
+				})
+			}
+		case "", "LINE_ITEM":
+			order["discountCode"] = map[string]any{
+				"itemFixedDiscountCode": map[string]any{
+					"amountSet": adminMoneyBag(defaultMoney(input.DiscountAmount), currency),
+					"code":      discountCode,
+				},
+			}
+		default:
+			return nil, fmt.Errorf("unsupported Shopify discount target %q", input.DiscountTargetType)
+		}
+	}
+	if len(customAttributes) > 0 {
+		order["customAttributes"] = customAttributes
+	}
+	if taxAmount := strings.TrimSpace(input.TaxAmount); taxAmount != "" && taxAmount != "0" && taxAmount != "0.00" {
+		taxRate := strings.TrimSpace(input.TaxRate)
+		if taxRate == "" {
+			return nil, fmt.Errorf("shopify tax rate is required when tax amount is non-zero")
+		}
+		taxTitle := strings.TrimSpace(input.TaxTitle)
+		if taxTitle == "" {
+			taxTitle = "Tax"
+		}
+		order["taxLines"] = []map[string]any{{
+			"title":    taxTitle,
+			"rate":     taxRate,
+			"priceSet": adminMoneyBag(taxAmount, currency),
+		}}
+	}
+	const mutation = `mutation CreatePawrdOrder(
+	  $order: OrderCreateOrderInput!,
+	  $options: OrderCreateOptionsInput
+	) {
+	  orderCreate(order: $order, options: $options) {
+	    order {
+	      id legacyResourceId name
+	      totalPriceSet { shopMoney { amount currencyCode } }
+	      lineItems(first: 100) { nodes { id } }
+	    }
 	    userErrors { field message }
 	  }
 	}`
@@ -372,7 +498,13 @@ func (c *AdminClient) CreateOrder(ctx context.Context, input AdminOrderInput) (*
 				ID               string `json:"id"`
 				LegacyResourceID string `json:"legacyResourceId"`
 				Name             string `json:"name"`
-				LineItems        struct {
+				TotalPriceSet    struct {
+					ShopMoney struct {
+						Amount       string `json:"amount"`
+						CurrencyCode string `json:"currencyCode"`
+					} `json:"shopMoney"`
+				} `json:"totalPriceSet"`
+				LineItems struct {
 					Nodes []struct {
 						ID string `json:"id"`
 					} `json:"nodes"`
@@ -384,24 +516,137 @@ func (c *AdminClient) CreateOrder(ctx context.Context, input AdminOrderInput) (*
 			} `json:"userErrors"`
 		} `json:"orderCreate"`
 	}
-	if err := c.execute(ctx, mutation, map[string]any{"order": order}, &data); err != nil {
+	variables := map[string]any{
+		"order": order,
+		"options": map[string]any{
+			"inventoryBehaviour":     "DECREMENT_OBEYING_POLICY",
+			"sendReceipt":            true,
+			"sendFulfillmentReceipt": false,
+		},
+	}
+	if err := c.execute(ctx, mutation, variables, &data); err != nil {
 		return nil, err
 	}
 	if len(data.OrderCreate.UserErrors) > 0 {
-		return nil, fmt.Errorf("shopify orderCreate: %s", data.OrderCreate.UserErrors[0].Message)
+		return nil, fmt.Errorf(
+			"%w: %s",
+			ErrOrderCreateRejected,
+			data.OrderCreate.UserErrors[0].Message,
+		)
 	}
 	if data.OrderCreate.Order == nil {
 		return nil, fmt.Errorf("shopify orderCreate returned no order")
 	}
 	result := &AdminOrderResult{
-		ID:       data.OrderCreate.Order.ID,
-		LegacyID: data.OrderCreate.Order.LegacyResourceID,
-		Name:     data.OrderCreate.Order.Name,
+		ID:          data.OrderCreate.Order.ID,
+		LegacyID:    data.OrderCreate.Order.LegacyResourceID,
+		Name:        data.OrderCreate.Order.Name,
+		TotalAmount: data.OrderCreate.Order.TotalPriceSet.ShopMoney.Amount,
+		Currency:    data.OrderCreate.Order.TotalPriceSet.ShopMoney.CurrencyCode,
 	}
 	for _, line := range data.OrderCreate.Order.LineItems.Nodes {
 		result.LineItemIDs = append(result.LineItemIDs, line.ID)
 	}
 	return result, nil
+}
+
+// FindOrderBySourceIdentifier returns the one Shopify order created for a
+// Stripe PaymentIntent. A nil result means Shopify has no matching order.
+func (c *AdminClient) FindOrderBySourceIdentifier(ctx context.Context, sourceIdentifier string) (*AdminOrderResult, error) {
+	sourceIdentifier = strings.TrimSpace(sourceIdentifier)
+	if err := validateSourceIdentifier(sourceIdentifier); err != nil {
+		return nil, err
+	}
+	const query = `query PawrdOrderBySourceIdentifier($query: String!) {
+	  orders(first: 2, query: $query) {
+	    nodes {
+	      id
+	      legacyResourceId
+	      name
+	      totalPriceSet { shopMoney { amount currencyCode } }
+	      lineItems(first: 100) { nodes { id } }
+	    }
+	  }
+	}`
+	var data struct {
+		Orders struct {
+			Nodes []struct {
+				ID               string `json:"id"`
+				LegacyResourceID string `json:"legacyResourceId"`
+				Name             string `json:"name"`
+				TotalPriceSet    struct {
+					ShopMoney struct {
+						Amount       string `json:"amount"`
+						CurrencyCode string `json:"currencyCode"`
+					} `json:"shopMoney"`
+				} `json:"totalPriceSet"`
+				LineItems struct {
+					Nodes []struct {
+						ID string `json:"id"`
+					} `json:"nodes"`
+				} `json:"lineItems"`
+			} `json:"nodes"`
+		} `json:"orders"`
+	}
+	if err := c.execute(ctx, query, map[string]any{
+		"query": "source_identifier:" + sourceIdentifier,
+	}, &data); err != nil {
+		return nil, err
+	}
+	if len(data.Orders.Nodes) == 0 {
+		return nil, nil
+	}
+	if len(data.Orders.Nodes) > 1 {
+		return nil, fmt.Errorf("multiple Shopify orders use source identifier %q", sourceIdentifier)
+	}
+	order := data.Orders.Nodes[0]
+	result := &AdminOrderResult{
+		ID: order.ID, LegacyID: order.LegacyResourceID, Name: order.Name,
+		TotalAmount: order.TotalPriceSet.ShopMoney.Amount,
+		Currency:    order.TotalPriceSet.ShopMoney.CurrencyCode,
+	}
+	for _, line := range order.LineItems.Nodes {
+		result.LineItemIDs = append(result.LineItemIDs, line.ID)
+	}
+	return result, nil
+}
+
+func adminMoneyBag(amount, currency string) map[string]any {
+	return map[string]any{
+		"shopMoney": map[string]any{
+			"amount": strings.TrimSpace(amount), "currencyCode": currency,
+		},
+	}
+}
+
+func defaultMoney(amount string) string {
+	if amount = strings.TrimSpace(amount); amount != "" {
+		return amount
+	}
+	return "0.00"
+}
+
+func sameAdminMoney(left, right string) bool {
+	leftAmount, leftOK := new(big.Rat).SetString(defaultMoney(left))
+	rightAmount, rightOK := new(big.Rat).SetString(defaultMoney(right))
+	return leftOK && rightOK && leftAmount.Cmp(rightAmount) == 0
+}
+
+func validateSourceIdentifier(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 255 {
+		return fmt.Errorf("Shopify source identifier is invalid")
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') ||
+			(char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') ||
+			char == '_' || char == '-' || char == '.' {
+			continue
+		}
+		return fmt.Errorf("Shopify source identifier is invalid")
+	}
+	return nil
 }
 
 func (c *AdminClient) FetchOrder(ctx context.Context, orderID string) (*AdminOrderSnapshot, error) {

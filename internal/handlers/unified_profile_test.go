@@ -21,6 +21,7 @@ import (
 // account/profile handlers touch, and points models.AuthDB at it.
 func setupUnifiedProfileTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
+	t.Setenv("JWT_SECRET", "test-only-jwt-secret-at-least-32-characters")
 	dsn := "file:" + strings.ReplaceAll(t.Name(), "/", "_") + "?mode=memory&cache=shared"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {

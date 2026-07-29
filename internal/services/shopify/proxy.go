@@ -2,11 +2,13 @@ package shopify
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +26,7 @@ var publicTokenFallbackWarningOnce sync.Once
 
 // Client handles Shopify Storefront API communication
 type Client struct {
+	endpoint        string
 	domain          string
 	storefrontToken string
 	authHeader      string
@@ -46,8 +49,14 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		})
 	}
 
+	domain := strings.TrimPrefix(strings.TrimSpace(cfg.ShopifyDomain), "https://")
+	domain = strings.TrimPrefix(domain, "http://")
+	domain = strings.TrimRight(domain, "/")
+	apiVersion := strings.TrimSpace(cfg.ShopifyStorefrontAPIVersion)
+
 	return &Client{
-		domain:          cfg.ShopifyDomain,
+		endpoint:        fmt.Sprintf("https://%s/api/%s/graphql.json", domain, apiVersion),
+		domain:          domain,
 		storefrontToken: token,
 		authHeader:      authHeader,
 		httpClient: &http.Client{
@@ -131,6 +140,7 @@ func (c *Client) FetchProducts(first int, after string) ([]Product, bool, string
 										height
 									}
 									availableForSale
+									requiresShipping
 								}
 							}
 						}
@@ -208,7 +218,7 @@ func (c *Client) SearchProducts(query string, first int) ([]Product, error) {
 						}
 						images(first: 5) { edges { node { id url altText width height } } }
 						variants(first: 5) {
-							edges { node { id title sku price { amount currencyCode } availableForSale } }
+							edges { node { id title sku price { amount currencyCode } availableForSale requiresShipping } }
 						}
 					}
 				}
@@ -322,8 +332,9 @@ func (c *Client) FetchProductByHandle(handle string) (*Product, error) {
 								selectedOptions {
 									name
 									value
-								}
+							}
 							availableForSale
+							requiresShipping
 						}
 					}
 				}
@@ -364,8 +375,10 @@ func (c *Client) FetchProductByHandle(handle string) (*Product, error) {
 
 // executeGraphQL performs the actual GraphQL request with retries
 func (c *Client) executeGraphQL(payload map[string]interface{}) (json.RawMessage, error) {
-	url := fmt.Sprintf("https://%s/api/2024-01/graphql.json", c.domain)
+	return c.executeGraphQLContext(context.Background(), payload, "")
+}
 
+func (c *Client) executeGraphQLContext(ctx context.Context, payload map[string]interface{}, buyerIP string) (json.RawMessage, error) {
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
@@ -377,13 +390,16 @@ func (c *Client) executeGraphQL(payload map[string]interface{}) (json.RawMessage
 			time.Sleep(time.Duration(attempt) * time.Second)
 		}
 
-		req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonPayload))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewBuffer(jsonPayload))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create request: %w", err)
 		}
 
 		req.Header.Set("Content-Type", "application/json")
 		c.setStorefrontAuthHeader(req)
+		if c.authHeader == privateStorefrontTokenHeader && strings.TrimSpace(buyerIP) != "" {
+			req.Header.Set("Shopify-Storefront-Buyer-IP", strings.TrimSpace(buyerIP))
+		}
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -458,14 +474,16 @@ type rawProduct struct {
 }
 
 type rawVariant struct {
-	ID               string           `json:"id"`
-	Title            string           `json:"title"`
-	SKU              string           `json:"sku"`
-	Price            Money            `json:"price"`
-	CompareAtPrice   *Money           `json:"compareAtPrice"`
-	Image            *Image           `json:"image"`
-	SelectedOptions  []SelectedOption `json:"selectedOptions"`
-	AvailableForSale bool             `json:"availableForSale"`
+	ID                string           `json:"id"`
+	Title             string           `json:"title"`
+	SKU               string           `json:"sku"`
+	Price             Money            `json:"price"`
+	CompareAtPrice    *Money           `json:"compareAtPrice"`
+	Image             *Image           `json:"image"`
+	SelectedOptions   []SelectedOption `json:"selectedOptions"`
+	AvailableForSale  bool             `json:"availableForSale"`
+	RequiresShipping  bool             `json:"requiresShipping"`
+	QuantityAvailable *int             `json:"quantityAvailable"`
 }
 
 func (rp *rawProduct) toProduct() Product {
@@ -477,14 +495,16 @@ func (rp *rawProduct) toProduct() Product {
 	variants := make([]Variant, 0, len(rp.Variants.Edges))
 	for _, edge := range rp.Variants.Edges {
 		variants = append(variants, Variant{
-			ID:               edge.Node.ID,
-			Title:            edge.Node.Title,
-			SKU:              edge.Node.SKU,
-			Price:            edge.Node.Price,
-			CompareAtPrice:   edge.Node.CompareAtPrice,
-			Image:            edge.Node.Image,
-			SelectedOptions:  edge.Node.SelectedOptions,
-			AvailableForSale: edge.Node.AvailableForSale,
+			ID:                edge.Node.ID,
+			Title:             edge.Node.Title,
+			SKU:               edge.Node.SKU,
+			Price:             edge.Node.Price,
+			CompareAtPrice:    edge.Node.CompareAtPrice,
+			Image:             edge.Node.Image,
+			SelectedOptions:   edge.Node.SelectedOptions,
+			AvailableForSale:  edge.Node.AvailableForSale,
+			RequiresShipping:  edge.Node.RequiresShipping,
+			QuantityAvailable: edge.Node.QuantityAvailable,
 		})
 	}
 

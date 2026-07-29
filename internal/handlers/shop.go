@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -14,18 +15,18 @@ import (
 
 // ShopProduct represents the simplified product format for iOS
 type ShopProduct struct {
-	ID              string   `json:"id"`
-	Title           string   `json:"title"`
-	Description     string   `json:"description"`
-	Price           string   `json:"price"`
-	CurrencyCode    string   `json:"currencyCode"`
-	ImageURL        string   `json:"imageUrl"`
-	ProductType     string   `json:"productType"`
-	Categories      []string `json:"categories,omitempty"`
-	Vendor          string   `json:"vendor"`
-	Handle          string   `json:"handle"`
-	VariantID       string   `json:"variantId"`
-	Available       bool     `json:"available"`
+	ID           string   `json:"id"`
+	Title        string   `json:"title"`
+	Description  string   `json:"description"`
+	Price        string   `json:"price"`
+	CurrencyCode string   `json:"currencyCode"`
+	ImageURL     string   `json:"imageUrl"`
+	ProductType  string   `json:"productType"`
+	Categories   []string `json:"categories,omitempty"`
+	Vendor       string   `json:"vendor"`
+	Handle       string   `json:"handle"`
+	VariantID    string   `json:"variantId"`
+	Available    bool     `json:"available"`
 	// Source identifies the fulfillment pipeline: "shopify" (ready-made) or
 	// "hicustom" (customizable blank). See docs §13.
 	Source string `json:"source"`
@@ -34,7 +35,7 @@ type ShopProduct struct {
 	Customizable bool `json:"customizable,omitempty"`
 	// BlankSKU is the HiCustom blank SKU (hicustom source only). The designer
 	// and checkout use it to look up the blank.
-	BlankSKU         string `json:"blankSku,omitempty"`
+	BlankSKU string `json:"blankSku,omitempty"`
 }
 
 // ProductsResponse is the response structure for product list
@@ -59,11 +60,18 @@ func newShopifyClient(cfg *config.Config) (ShopifyClient, error) {
 	return shopify.NewClient(cfg)
 }
 
-// newHiCustomClient returns a mock when USE_MOCK_HICUSTOM=true (or when creds are
-// absent), so the catalog + designer flow works in dev without HiCustom access.
+// newHiCustomClient is guarded by an explicit production feature flag. Missing
+// credentials never fall back to mock data because doing so would publish
+// non-fulfillable products.
 func newHiCustomClient(cfg *config.Config) (hicustom.Client, error) {
-	if cfg.UseMockHiCustom || cfg.HiCustomAppKey == "" {
+	if !cfg.HiCustomEnabled {
+		return nil, fmt.Errorf("HiCustom catalog is disabled")
+	}
+	if cfg.UseMockHiCustom {
 		return hicustom.NewMockClient(), nil
+	}
+	if err := cfg.ValidateHiCustomConfig(); err != nil {
+		return nil, err
 	}
 	return hicustom.NewClient(cfg)
 }
@@ -90,7 +98,8 @@ func transformBlankProduct(p hicustom.BlankProduct) ShopProduct {
 
 // NewShopHandler creates a handler for shop endpoints. Aggregates Shopify
 // (ready-made) and HiCustom (customizable blank) products based on the `source`
-// query param: "shopify", "hicustom", or "all" (default). See docs §13.3.
+// query param: "shopify" (default), "hicustom", or "all". Disabled HiCustom
+// products are omitted from "all" and explicit HiCustom access fails closed.
 func NewShopHandler(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		EnableCors(&w)
@@ -104,7 +113,17 @@ func NewShopHandler(cfg *config.Config) http.HandlerFunc {
 
 		source := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("source")))
 		if source == "" {
-			source = "all"
+			source = "shopify"
+		}
+		switch source {
+		case "shopify", "hicustom", "all":
+		default:
+			http.Error(w, "Unsupported shop source", http.StatusBadRequest)
+			return
+		}
+		if source == "hicustom" && !cfg.HiCustomEnabled {
+			http.NotFound(w, r)
+			return
 		}
 
 		// Parse query parameters
@@ -136,7 +155,7 @@ func NewShopHandler(cfg *config.Config) http.HandlerFunc {
 			}
 		}
 
-		if source == "all" || source == "hicustom" {
+		if cfg.HiCustomEnabled && (source == "all" || source == "hicustom") {
 			client, err := newHiCustomClient(cfg)
 			if err != nil {
 				http.Error(w, "HiCustom configuration error: "+err.Error(), http.StatusInternalServerError)
@@ -245,7 +264,9 @@ func NewShopSearchHandler(cfg *config.Config) http.HandlerFunc {
 
 		result := make([]ShopProduct, 0, len(products))
 		for _, p := range products {
-			result = append(result, transformProduct(p))
+			product := transformProduct(p)
+			product.Source = "shopify"
+			result = append(result, product)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
