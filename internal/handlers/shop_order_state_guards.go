@@ -41,6 +41,24 @@ func shopOrderStatusUnlessProtected(proposed string) any {
 	)
 }
 
+func shopOrderCancellationRequestStatus() any {
+	return gorm.Expr(
+		`CASE
+			WHEN LOWER(COALESCE(status, '')) IN ?
+				OR LOWER(COALESCE(financial_status, '')) IN ?
+				OR LOWER(COALESCE(dispute_status, '')) NOT IN ?
+				OR UPPER(COALESCE(fulfillment_status, '')) NOT IN ('', 'UNFULFILLED')
+				OR COALESCE(tracking_number, '') <> ''
+				OR LOWER(COALESCE(fulfillment_request_status, '')) IN ('submitting', 'submitted', 'accepted')
+			THEN status
+			ELSE 'cancellation_requested'
+		END`,
+		shopOrderProtectedBusinessStatuses,
+		shopOrderProtectedFinancialStatuses,
+		shopOrderInactiveDisputeStatuses,
+	)
+}
+
 func shopOrderLogisticsStatusUnlessProtected(proposed string) any {
 	return gorm.Expr(
 		`CASE

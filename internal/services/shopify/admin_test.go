@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -204,6 +205,8 @@ func TestCreateOrderUsesSafeTagsAndSourceIdentifier(t *testing.T) {
 	client := newTestAdminClient(server, &adminTokenProvider{staticToken: "static-token"})
 	_, err := client.CreateOrder(context.Background(), AdminOrderInput{
 		Currency:        "HKD",
+		CustomerEmail:   "alice@example.com",
+		CustomerPhone:   "+85261234567",
 		ShippingName:    "Alice Test",
 		ShippingPhone:   "+85261234567",
 		ShippingAddress: "1 Test Street",
@@ -266,8 +269,30 @@ func TestCreateOrderUsesSafeTagsAndSourceIdentifier(t *testing.T) {
 	if shippingAddress["firstName"] != "Alice Test" ||
 		shippingAddress["address1"] != "1 Test Street" ||
 		shippingAddress["city"] != "Wan Chai" ||
+		shippingAddress["provinceCode"] != "HK" ||
 		shippingAddress["countryCode"] != "HK" {
 		t.Fatalf("unexpected shipping address: %#v", shippingAddress)
+	}
+	billingAddress, ok := orderVariables["billingAddress"].(map[string]any)
+	if !ok || !reflect.DeepEqual(billingAddress, shippingAddress) {
+		t.Fatalf(
+			"billing address must match the collected shipping address: shipping=%#v billing=%#v",
+			shippingAddress,
+			orderVariables["billingAddress"],
+		)
+	}
+	customer, ok := orderVariables["customer"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing Shopify customer association: %#v", orderVariables["customer"])
+	}
+	toUpsert, ok := customer["toUpsert"].(map[string]any)
+	if !ok ||
+		toUpsert["email"] != "alice@example.com" ||
+		toUpsert["firstName"] != "Alice Test" {
+		t.Fatalf("unexpected Shopify customer upsert: %#v", customer)
+	}
+	if _, hasPhone := toUpsert["phone"]; hasPhone {
+		t.Fatalf("orderCreate must not claim a globally unique customer phone: %#v", toUpsert)
 	}
 	if optionsVariables["inventoryBehaviour"] != "DECREMENT_OBEYING_POLICY" ||
 		optionsVariables["sendReceipt"] != true ||

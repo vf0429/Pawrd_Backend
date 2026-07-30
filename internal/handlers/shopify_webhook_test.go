@@ -290,7 +290,8 @@ func TestShopifyCanceledOrderRequiresSeparateStripeRefund(t *testing.T) {
 	db := newShopifyWebhookTestDB(t)
 	order := models.ShopOrder{
 		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: "pi_cancel_notice",
-		ShopifyOrderLegacyID: "789", Status: "processing", FinancialStatus: "paid",
+		ShopifyOrderLegacyID: "789", Status: "cancellation_requested",
+		FinancialStatus: "paid", ReturnStatus: "CANCELLATION_REQUESTED",
 		Currency: "HKD", TotalAmountMinor: 1000,
 	}
 	if err := db.Create(&order).Error; err != nil {

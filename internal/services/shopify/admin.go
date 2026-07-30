@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -394,26 +395,35 @@ func (c *AdminClient) CreateOrder(ctx context.Context, input AdminOrderInput) (*
 		}
 		lines = append(lines, payload)
 	}
+	address := map[string]any{
+		"firstName":    strings.TrimSpace(input.ShippingName),
+		"phone":        strings.TrimSpace(input.ShippingPhone),
+		"address1":     strings.TrimSpace(input.ShippingAddress),
+		"city":         strings.TrimSpace(input.ShippingCity),
+		"provinceCode": shopifyHongKongProvinceCode(input.ShippingRegion),
+		"countryCode":  "HK",
+	}
 	order := map[string]any{
 		"currency":         currency,
-		"email":            input.CustomerEmail,
-		"phone":            input.CustomerPhone,
+		"email":            strings.TrimSpace(input.CustomerEmail),
+		"phone":            strings.TrimSpace(input.CustomerPhone),
 		"financialStatus":  "PAID",
 		"lineItems":        lines,
 		"sourceIdentifier": strings.TrimSpace(input.PaymentID),
-		"shippingAddress": map[string]any{
-			"firstName":   input.ShippingName,
-			"phone":       input.ShippingPhone,
-			"address1":    input.ShippingAddress,
-			"city":        input.ShippingCity,
-			"province":    input.ShippingRegion,
-			"countryCode": "HK",
-		},
-		"tags": []string{"Pawrd", "Stripe"},
+		"shippingAddress":  address,
+		"billingAddress":   maps.Clone(address),
+		"tags":             []string{"Pawrd", "Stripe"},
 		"transactions": []map[string]any{{
 			"amountSet": adminMoneyBag(strings.TrimSpace(input.Amount), currency),
 			"gateway":   "Stripe", "kind": "SALE", "status": "SUCCESS",
 		}},
+	}
+	if customerEmail := strings.TrimSpace(input.CustomerEmail); customerEmail != "" {
+		customer := map[string]any{
+			"email":     customerEmail,
+			"firstName": strings.TrimSpace(input.ShippingName),
+		}
+		order["customer"] = map[string]any{"toUpsert": customer}
 	}
 	customAttributes := make([]map[string]any, 0, 2)
 	if quoteID := strings.TrimSpace(input.QuoteID); quoteID != "" {
@@ -548,6 +558,19 @@ func (c *AdminClient) CreateOrder(ctx context.Context, input AdminOrderInput) (*
 		result.LineItemIDs = append(result.LineItemIDs, line.ID)
 	}
 	return result, nil
+}
+
+func shopifyHongKongProvinceCode(region string) string {
+	switch strings.ToLower(strings.TrimSpace(region)) {
+	case "hong kong island", "hk", "港島", "香港島":
+		return "HK"
+	case "kowloon", "kln", "九龍":
+		return "KLN"
+	case "new territories", "nt", "新界":
+		return "NT"
+	default:
+		return strings.TrimSpace(region)
+	}
 }
 
 // FindOrderBySourceIdentifier returns the one Shopify order created for a

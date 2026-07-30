@@ -290,6 +290,7 @@ func validateOrderForFulfillmentRequest(order models.ShopOrder) error {
 	}
 	status := strings.ToLower(strings.TrimSpace(order.Status))
 	if status == "canceled" || status == "refunded" ||
+		status == "cancellation_requested" ||
 		strings.Contains(status, "dispute") ||
 		strings.HasPrefix(status, "return_") ||
 		status == "reconciliation_required" {
