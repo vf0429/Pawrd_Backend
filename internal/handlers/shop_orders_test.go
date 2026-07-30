@@ -119,6 +119,119 @@ func TestShopOrderReturnRequestIsOwnedConfirmedAndSynced(t *testing.T) {
 	}
 }
 
+func TestUnfulfilledShopOrderCreatesCancellationRequestInsteadOfInvalidReturn(t *testing.T) {
+	db := newShopOrderTestDB(t)
+	order := models.ShopOrder{
+		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: shopOrderStringPointer("pi_cancel_1"),
+		ShopifyOrderID: shopOrderStringPointer("gid://shopify/Order/cancel-1"),
+		Status:         "processing", FinancialStatus: "paid", FulfillmentStatus: "UNFULFILLED",
+		Currency: "HKD", TotalAmountMinor: 1000,
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	admin := &fakeShopifyOrderAdmin{}
+	req := authorizedShopRequest(
+		t,
+		http.MethodPost,
+		"/api/shop/orders/"+order.ID+"/return-request",
+		"user-1",
+		map[string]any{"reason": "UNWANTED", "note": "Please cancel", "confirmed": true},
+	)
+	req.SetPathValue("orderID", order.ID)
+	rec := httptest.NewRecorder()
+
+	NewShopOrderReturnHandler(db, admin).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !admin.tagged {
+		t.Fatal("unfulfilled cancellation request was not synced to Shopify")
+	}
+	if admin.requestedReason != "" {
+		t.Fatalf("unfulfilled order must not call Shopify returnRequest: %q", admin.requestedReason)
+	}
+	var updated models.ShopOrder
+	if err := db.First(&updated, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "cancellation_requested" ||
+		updated.ReturnStatus != "CANCELLATION_REQUESTED" ||
+		updated.ReturnReason != "UNWANTED" {
+		t.Fatalf("cancellation request state not persisted: %+v", updated)
+	}
+	dto := makeShopOrderDTO(updated)
+	if dto.CanRequestReturn || dto.CanRequestCancellation {
+		t.Fatalf("a submitted cancellation must disable duplicate customer requests: %+v", dto)
+	}
+}
+
+func TestUnfulfilledShopOrderAdvertisesCancellationNotReturn(t *testing.T) {
+	order := models.ShopOrder{
+		ID:     uuid.NewString(),
+		UserID: "user-1", PaymentIntentID: shopOrderStringPointer("pi_cancel_eligibility"),
+		ShopifyOrderID: shopOrderStringPointer("gid://shopify/Order/cancel-eligibility"),
+		Status:         "processing", FinancialStatus: "paid", FulfillmentStatus: "UNFULFILLED",
+		Currency: "HKD", TotalAmountMinor: 1000,
+	}
+
+	dto := makeShopOrderDTO(order)
+
+	if dto.CanRequestReturn {
+		t.Fatal("an unfulfilled order cannot use Shopify returnRequest")
+	}
+	if !dto.CanRequestCancellation {
+		t.Fatal("an unfulfilled paid order should allow a cancellation/refund request")
+	}
+}
+
+func TestCancellationRequestDoesNotHideConcurrentShipment(t *testing.T) {
+	db := newShopOrderTestDB(t)
+	order := models.ShopOrder{
+		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: shopOrderStringPointer("pi_cancel_race"),
+		ShopifyOrderID: shopOrderStringPointer("gid://shopify/Order/cancel-race"),
+		Status:         "processing", FinancialStatus: "paid", FulfillmentStatus: "UNFULFILLED",
+		Currency: "HKD", TotalAmountMinor: 1000,
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	admin := &fakeShopifyOrderAdmin{afterTag: func() {
+		if err := db.Model(&models.ShopOrder{}).Where("id = ?", order.ID).
+			Updates(map[string]any{
+				"status": "shipped", "fulfillment_status": "IN_TRANSIT",
+				"tracking_number": "TRACK-CANCEL-RACE",
+			}).Error; err != nil {
+			t.Fatalf("commit concurrent shipment: %v", err)
+		}
+	}}
+	req := authorizedShopRequest(
+		t,
+		http.MethodPost,
+		"/api/shop/orders/"+order.ID+"/return-request",
+		"user-1",
+		map[string]any{"reason": "UNWANTED", "confirmed": true},
+	)
+	req.SetPathValue("orderID", order.ID)
+	rec := httptest.NewRecorder()
+
+	NewShopOrderReturnHandler(db, admin).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var updated models.ShopOrder
+	if err := db.First(&updated, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "shipped" ||
+		updated.FulfillmentStatus != "IN_TRANSIT" ||
+		updated.ReturnStatus != "CANCELLATION_REQUESTED" {
+		t.Fatalf("cancellation request hid shipment or lost the request: %+v", updated)
+	}
+}
+
 func TestShopOrderCannotBeReadByAnotherUser(t *testing.T) {
 	db := newShopOrderTestDB(t)
 	order := models.ShopOrder{
@@ -299,6 +412,54 @@ func TestShopOrderDetailRefreshUpdatesTrackingWithoutRegressingMoneyStatus(t *te
 				t.Fatalf("detail refresh regressed business state or lost tracking: %+v", stored)
 			}
 		})
+	}
+}
+
+func TestShopOrderDetailRefreshReconcilesClosedShopifyReturn(t *testing.T) {
+	db := newShopOrderTestDB(t)
+	order := models.ShopOrder{
+		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: shopOrderStringPointer("pi_return_detail"),
+		ShopifyOrderID: shopOrderStringPointer("gid://shopify/Order/return-detail"),
+		Status:         "return_requested", FinancialStatus: "paid",
+		FulfillmentStatus: "DELIVERED", ReturnID: "gid://shopify/Return/1",
+		ReturnName: "#1001-R1", ReturnStatus: "REQUESTED",
+		ReturnReason: "DEFECTIVE", Currency: "HKD", TotalAmountMinor: 1000,
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	deliveredAt := time.Now().UTC()
+	admin := &fakeShopifyOrderAdmin{snapshot: &shopify.AdminOrderSnapshot{
+		FulfillmentStatus:  "DELIVERED",
+		HasShippingAddress: true,
+		DeliveredAt:        &deliveredAt,
+		Return: &shopify.AdminReturnResult{
+			ID: "gid://shopify/Return/1", Name: "#1001-R1", Status: "CLOSED",
+		},
+	}}
+	req := authorizedShopRequest(
+		t,
+		http.MethodGet,
+		"/api/shop/orders/"+order.ID,
+		"user-1",
+		nil,
+	)
+	req.SetPathValue("orderID", order.ID)
+	rec := httptest.NewRecorder()
+
+	NewShopOrderDetailHandler(db, admin).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail response=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var stored models.ShopOrder
+	if err := db.First(&stored, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "return_closed" ||
+		stored.ReturnStatus != "CLOSED" ||
+		stored.ReturnReason != "DEFECTIVE" {
+		t.Fatalf("Shopify return state was not reconciled: %+v", stored)
 	}
 }
 

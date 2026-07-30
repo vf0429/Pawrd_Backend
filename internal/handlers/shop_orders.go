@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -22,24 +23,25 @@ type shopOrderItemDTO struct {
 }
 
 type shopOrderDTO struct {
-	ID                  string             `json:"id"`
-	OrderNumber         string             `json:"orderNumber"`
-	Status              string             `json:"status"`
-	FinancialStatus     string             `json:"financialStatus"`
-	FulfillmentStatus   string             `json:"fulfillmentStatus"`
-	Currency            string             `json:"currency"`
-	TotalAmountMinor    int64              `json:"totalAmountMinor"`
-	RefundedAmountMinor int64              `json:"refundedAmountMinor"`
-	DisputeStatus       string             `json:"disputeStatus,omitempty"`
-	DisputedAmountMinor int64              `json:"disputedAmountMinor,omitempty"`
-	Items               []shopOrderItemDTO `json:"items"`
-	ShippingAddress     any                `json:"shippingAddress"`
-	Tracking            any                `json:"tracking"`
-	CustomerReceivedAt  *time.Time         `json:"customerReceivedAt,omitempty"`
-	ReturnRequest       any                `json:"returnRequest,omitempty"`
-	CanConfirmReceipt   bool               `json:"canConfirmReceipt"`
-	CanRequestReturn    bool               `json:"canRequestReturn"`
-	CreatedAt           time.Time          `json:"createdAt"`
+	ID                     string             `json:"id"`
+	OrderNumber            string             `json:"orderNumber"`
+	Status                 string             `json:"status"`
+	FinancialStatus        string             `json:"financialStatus"`
+	FulfillmentStatus      string             `json:"fulfillmentStatus"`
+	Currency               string             `json:"currency"`
+	TotalAmountMinor       int64              `json:"totalAmountMinor"`
+	RefundedAmountMinor    int64              `json:"refundedAmountMinor"`
+	DisputeStatus          string             `json:"disputeStatus,omitempty"`
+	DisputedAmountMinor    int64              `json:"disputedAmountMinor,omitempty"`
+	Items                  []shopOrderItemDTO `json:"items"`
+	ShippingAddress        any                `json:"shippingAddress"`
+	Tracking               any                `json:"tracking"`
+	CustomerReceivedAt     *time.Time         `json:"customerReceivedAt,omitempty"`
+	ReturnRequest          any                `json:"returnRequest,omitempty"`
+	CanConfirmReceipt      bool               `json:"canConfirmReceipt"`
+	CanRequestReturn       bool               `json:"canRequestReturn"`
+	CanRequestCancellation bool               `json:"canRequestCancellation"`
+	CreatedAt              time.Time          `json:"createdAt"`
 }
 
 func NewShopOrdersHandler(db *gorm.DB) http.HandlerFunc {
@@ -100,12 +102,39 @@ func NewShopOrderDetailHandler(db *gorm.DB, admin shopify.AdminOrderClient) http
 					"estimated_delivery_at": snapshot.EstimatedDeliveryAt,
 					"delivered_at":          snapshot.DeliveredAt,
 				}
-				if snapshot.DeliveredAt != nil {
+				if snapshot.Return != nil {
+					updates["return_id"] = snapshot.Return.ID
+					updates["return_name"] = snapshot.Return.Name
+					updates["return_status"] = snapshot.Return.Status
+					updates["status"] = shopOrderStatusUnlessProtected(
+						"return_" + strings.ToLower(snapshot.Return.Status),
+					)
+				} else if snapshot.DeliveredAt != nil {
 					updates["status"] = shopOrderLogisticsStatusUnlessProtected("delivered")
 				} else if snapshot.TrackingNumber != "" {
 					updates["status"] = shopOrderLogisticsStatusUnlessProtected("shipped")
 				}
 				_ = db.Model(order).Updates(updates).Error
+				if !snapshot.HasShippingAddress {
+					if updater, ok := admin.(shopify.AdminOrderAddressClient); ok {
+						address := shopify.AdminShippingAddressInput{
+							Name: order.CustomerName, Phone: order.CustomerPhone,
+							Address: order.ShippingAddress1, City: order.ShippingDistrict,
+							Region: order.ShippingRegion,
+						}
+						if err := updater.UpdateOrderShippingAddress(
+							r.Context(),
+							shopifyOrderID,
+							address,
+						); err != nil {
+							log.Printf(
+								"[shopify] repair shipping address order=%s: %v",
+								order.ID,
+								err,
+							)
+						}
+					}
+				}
 				_ = db.Preload("Items").First(order, "id = ?", order.ID).Error
 			}
 		}
@@ -199,8 +228,10 @@ func NewShopOrderReturnHandler(db *gorm.DB, admin shopify.AdminOrderClient) http
 		if !ok {
 			return
 		}
-		if !canRequestReturn(*order) {
-			http.Error(w, "order is not eligible for a return request", http.StatusConflict)
+		requestsReturn := canRequestReturn(*order)
+		requestsCancellation := canRequestCancellation(*order)
+		if !requestsReturn && !requestsCancellation {
+			http.Error(w, "order is not eligible for a cancellation or return request", http.StatusConflict)
 			return
 		}
 		shopifyOrderID := order.ShopifyOrderGID()
@@ -208,17 +239,34 @@ func NewShopOrderReturnHandler(db *gorm.DB, admin shopify.AdminOrderClient) http
 			http.Error(w, "Shopify order service is unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		result, err := admin.RequestReturn(r.Context(), shopifyOrderID, req.Reason, strings.TrimSpace(req.Note))
-		if err != nil {
-			http.Error(w, "Shopify return request failed: "+err.Error(), http.StatusBadGateway)
-			return
+		note := strings.TrimSpace(req.Note)
+		result := &shopify.AdminReturnResult{}
+		nextOrderStatus := shopOrderStatusUnlessProtected("return_requested")
+		if requestsReturn {
+			var err error
+			result, err = admin.RequestReturn(r.Context(), shopifyOrderID, req.Reason, note)
+			if err != nil {
+				http.Error(w, "Shopify return request failed: "+err.Error(), http.StatusBadGateway)
+				return
+			}
+		} else {
+			if err := admin.AddOrderTags(
+				r.Context(),
+				shopifyOrderID,
+				[]string{"Pawrd: cancellation requested"},
+			); err != nil {
+				http.Error(w, "failed to sync cancellation request", http.StatusBadGateway)
+				return
+			}
+			result.Status = "CANCELLATION_REQUESTED"
+			nextOrderStatus = shopOrderCancellationRequestStatus()
 		}
 		if err := db.Model(order).Updates(map[string]any{
 			"return_id": result.ID, "return_name": result.Name, "return_status": result.Status,
-			"return_reason": req.Reason, "return_note": strings.TrimSpace(req.Note),
-			"status": shopOrderStatusUnlessProtected("return_requested"),
+			"return_reason": req.Reason, "return_note": note,
+			"status": nextOrderStatus,
 		}).Error; err != nil {
-			http.Error(w, "failed to save return request", http.StatusInternalServerError)
+			http.Error(w, "failed to save cancellation or return request", http.StatusInternalServerError)
 			return
 		}
 		if err := db.Preload("Items").First(order, "id = ?", order.ID).Error; err != nil {
@@ -260,6 +308,27 @@ func canRequestReturn(order models.ShopOrder) bool {
 			strings.EqualFold(order.FulfillmentStatus, "DELIVERED"))
 }
 
+func canRequestCancellation(order models.ShopOrder) bool {
+	if !shopOrderAllowsCustomerLifecycle(order) ||
+		order.ShopifyOrderGID() == "" ||
+		order.ReturnStatus != "" ||
+		order.CustomerReceivedAt != nil ||
+		order.DeliveredAt != nil ||
+		strings.TrimSpace(order.TrackingNumber) != "" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(order.FulfillmentRequestStatus)) {
+	case "submitting", "submitted", "accepted":
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(order.FulfillmentStatus)) {
+	case "", "UNFULFILLED":
+		return true
+	default:
+		return false
+	}
+}
+
 func makeShopOrderDTO(order models.ShopOrder) shopOrderDTO {
 	items := make([]shopOrderItemDTO, 0, len(order.Items))
 	for _, item := range order.Items {
@@ -294,6 +363,7 @@ func makeShopOrderDTO(order models.ShopOrder) shopOrderDTO {
 			"status": order.FulfillmentStatus, "estimatedDeliveryAt": order.EstimatedDeliveryAt, "deliveredAt": order.DeliveredAt,
 		},
 		CustomerReceivedAt: order.CustomerReceivedAt, ReturnRequest: returnRequest,
-		CanConfirmReceipt: canConfirmReceipt(order), CanRequestReturn: canRequestReturn(order), CreatedAt: order.CreatedAt,
+		CanConfirmReceipt: canConfirmReceipt(order), CanRequestReturn: canRequestReturn(order),
+		CanRequestCancellation: canRequestCancellation(order), CreatedAt: order.CreatedAt,
 	}
 }

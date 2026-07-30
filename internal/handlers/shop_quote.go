@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,8 +49,18 @@ type ShopQuoteResponse struct {
 
 type storefrontQuoteClientFactory func(*config.Config) (shopify.StorefrontQuoteClient, error)
 
+type shopAccountEmailResolver func(context.Context, string) (string, error)
+
+var errShopAuthStorageUnavailable = errors.New("shop auth account storage is unavailable")
+
 func NewShopQuoteHandler(cfg *config.Config, db *gorm.DB) http.HandlerFunc {
-	return newShopQuoteHandler(cfg, db, newStorefrontQuoteClient, time.Now)
+	return newShopQuoteHandler(
+		cfg,
+		db,
+		newStorefrontQuoteClient,
+		time.Now,
+		currentShopAccountEmail,
+	)
 }
 
 func newStorefrontQuoteClient(cfg *config.Config) (shopify.StorefrontQuoteClient, error) {
@@ -64,6 +75,7 @@ func newShopQuoteHandler(
 	db *gorm.DB,
 	clientFactory storefrontQuoteClientFactory,
 	now func() time.Time,
+	accountEmailResolver shopAccountEmailResolver,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		EnableCors(&w)
@@ -75,6 +87,15 @@ func newShopQuoteHandler(
 			return
 		}
 		claims, ok := authenticatedShopClaims(w, r)
+		if !ok {
+			return
+		}
+		accountEmail, ok := resolveShopAccountEmail(
+			w,
+			r,
+			claims.UserID,
+			accountEmailResolver,
+		)
 		if !ok {
 			return
 		}
@@ -100,9 +121,27 @@ func newShopQuoteHandler(
 			err      error
 		)
 		if strings.TrimSpace(req.QuoteID) == "" {
-			response, err = createShopQuote(r, cfg, db, claims, req, clientFactory, now)
+			response, err = createShopQuote(
+				r,
+				cfg,
+				db,
+				claims,
+				accountEmail,
+				req,
+				clientFactory,
+				now,
+			)
 		} else {
-			response, err = selectShopQuoteDelivery(r, cfg, db, claims, req, clientFactory, now)
+			response, err = selectShopQuoteDelivery(
+				r,
+				cfg,
+				db,
+				claims,
+				accountEmail,
+				req,
+				clientFactory,
+				now,
+			)
 		}
 		if err != nil {
 			writeShopQuoteError(w, err)
@@ -136,6 +175,7 @@ func createShopQuote(
 	cfg *config.Config,
 	db *gorm.DB,
 	claims *auth.Claims,
+	accountEmail string,
 	req ShopQuoteRequest,
 	clientFactory storefrontQuoteClientFactory,
 	now func() time.Time,
@@ -151,6 +191,12 @@ func createShopQuote(
 	customer, err := shopCheckoutAccountCustomer(claims.UserID)
 	if err != nil {
 		return ShopQuoteResponse{}, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(customer.Email), strings.TrimSpace(accountEmail)) {
+		return ShopQuoteResponse{}, quoteError(
+			http.StatusForbidden,
+			"Checkout account email changed; request a new quote",
+		)
 	}
 	if err := validateHongKongShipping(req.Shipping); err != nil {
 		return ShopQuoteResponse{}, quoteError(http.StatusBadRequest, err.Error())
@@ -231,6 +277,7 @@ func selectShopQuoteDelivery(
 	cfg *config.Config,
 	db *gorm.DB,
 	claims *auth.Claims,
+	accountEmail string,
 	req ShopQuoteRequest,
 	clientFactory storefrontQuoteClientFactory,
 	now func() time.Time,
@@ -266,6 +313,15 @@ func selectShopQuoteDelivery(
 	previous, err := record.DecodeAndVerifySnapshot()
 	if err != nil {
 		return ShopQuoteResponse{}, fmt.Errorf("verify shop quote: %w", err)
+	}
+	if !strings.EqualFold(
+		strings.TrimSpace(previous.Customer.Email),
+		strings.TrimSpace(accountEmail),
+	) {
+		return ShopQuoteResponse{}, quoteError(
+			http.StatusForbidden,
+			"Shop quote email no longer matches the authenticated account; request a new quote",
+		)
 	}
 	var selected *models.ShopQuoteDeliveryOption
 	for index := range previous.DeliveryOptions {
@@ -391,7 +447,14 @@ func shopCheckoutAccountCustomer(userID string) (models.ShopQuoteCustomer, error
 	}
 	phone := ""
 	if p := publicPhone(account.Phone); p != nil {
-		phone = *p
+		normalizedPhone, err := normalizeHongKongPhone(*p)
+		if err != nil {
+			return models.ShopQuoteCustomer{}, quoteError(
+				http.StatusBadRequest,
+				"Account phone is invalid: "+err.Error(),
+			)
+		}
+		phone = normalizedPhone
 	}
 	return models.ShopQuoteCustomer{
 		Name:  strings.TrimSpace(account.Name),
@@ -612,6 +675,48 @@ func authenticatedShopClaims(w http.ResponseWriter, r *http.Request) (*auth.Clai
 		return nil, false
 	}
 	return claims, true
+}
+
+func currentShopAccountEmail(ctx context.Context, userID string) (string, error) {
+	if models.AuthDB == nil {
+		return "", errShopAuthStorageUnavailable
+	}
+	var user models.AuthUser
+	err := models.AuthDB.WithContext(ctx).
+		Select("email").
+		First(&user, "id = ?", strings.TrimSpace(userID)).
+		Error
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(user.Email), nil
+}
+
+func resolveShopAccountEmail(
+	w http.ResponseWriter,
+	r *http.Request,
+	userID string,
+	resolver shopAccountEmailResolver,
+) (string, bool) {
+	if resolver == nil {
+		http.Error(w, "Auth account storage is unavailable", http.StatusServiceUnavailable)
+		return "", false
+	}
+	email, err := resolver(r.Context(), strings.TrimSpace(userID))
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		http.Error(w, "Authenticated account not found", http.StatusUnauthorized)
+		return "", false
+	}
+	if err != nil {
+		http.Error(w, "Auth account storage is unavailable", http.StatusServiceUnavailable)
+		return "", false
+	}
+	email = strings.TrimSpace(email)
+	if email == "" {
+		http.Error(w, "Authenticated account email is unavailable", http.StatusForbidden)
+		return "", false
+	}
+	return email, true
 }
 
 func shopBuyerIP(r *http.Request) string {

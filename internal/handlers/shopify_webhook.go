@@ -273,6 +273,10 @@ func shopifyWebhookReturnStatus(topic, supplied string) string {
 		return "REQUESTED"
 	case "returns/approve", "returns/reopen":
 		return "OPEN"
+	case "returns/process":
+		// Processing can be partial; Shopify closes the return separately once
+		// all items and restock decisions are complete.
+		return "OPEN"
 	case "returns/decline":
 		return "DECLINED"
 	case "returns/cancel":

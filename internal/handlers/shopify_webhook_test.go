@@ -145,7 +145,7 @@ func TestShopifyReturnWebhooksResolveNestedOrderPayloads(t *testing.T) {
 		{topic: "returns/cancel", expectedStatus: "CANCELED"},
 		{topic: "returns/close", expectedStatus: "CLOSED"},
 		{topic: "returns/reopen", expectedStatus: "OPEN"},
-		{topic: "returns/process", suppliedStatus: "closed", expectedStatus: "CLOSED"},
+		{topic: "returns/process", expectedStatus: "OPEN"},
 	}
 	for index, testCase := range testCases {
 		t.Run(testCase.topic, func(t *testing.T) {
@@ -290,7 +290,8 @@ func TestShopifyCanceledOrderRequiresSeparateStripeRefund(t *testing.T) {
 	db := newShopifyWebhookTestDB(t)
 	order := models.ShopOrder{
 		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: shopOrderStringPointer("pi_cancel_notice"),
-		ShopifyOrderLegacyID: "789", Status: "processing", FinancialStatus: "paid",
+		ShopifyOrderLegacyID: "789", Status: "cancellation_requested",
+		FinancialStatus: "paid", ReturnStatus: "CANCELLATION_REQUESTED",
 		Currency: "HKD", TotalAmountMinor: 1000,
 	}
 	if err := db.Create(&order).Error; err != nil {

@@ -54,7 +54,7 @@ func phase4PaymentSheetHandler(
 ) http.HandlerFunc {
 	return newShopPaymentSheetHandler(cfg, db, func(*config.Config) (checkoutPaymentService, error) {
 		return fake, nil
-	}, time.Now)
+	}, time.Now, currentShopAccountEmail)
 }
 
 // Order (with the immutable shipping snapshot) exists BEFORE the Stripe call.
@@ -254,6 +254,7 @@ func TestPhase4QuoteCustomerServerAuthoritativeAndPhoneQuarantined(t *testing.T)
 		db,
 		func(*config.Config) (shopify.StorefrontQuoteClient, error) { return client, nil },
 		time.Now,
+		currentShopAccountEmail,
 	)
 
 	rec := performShopFlowRequest(t, handler, token, ShopQuoteRequest{
@@ -320,6 +321,7 @@ func TestPhase4ShippingPhoneNormalizedAcrossPipeline(t *testing.T) {
 				db,
 				func(*config.Config) (shopify.StorefrontQuoteClient, error) { return client, nil },
 				time.Now,
+				currentShopAccountEmail,
 			)
 
 			createRec := performShopFlowRequest(t, quoteHandler, token, ShopQuoteRequest{
@@ -370,6 +372,7 @@ func TestPhase4ShippingPhoneNormalizedAcrossPipeline(t *testing.T) {
 				db,
 				func(*config.Config) (checkoutPaymentService, error) { return paymentService, nil },
 				time.Now,
+				currentShopAccountEmail,
 			)
 			sheetRec := performShopFlowRequest(t, sheetHandler, token, ShopPaymentSheetRequest{QuoteID: created.QuoteID})
 			if sheetRec.Code != http.StatusOK {

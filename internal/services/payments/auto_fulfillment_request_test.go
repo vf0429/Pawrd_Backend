@@ -88,6 +88,10 @@ func TestFulfillmentRequestGateRejectsCanceledRefundedDisputedReturningAndPendin
 		refund bool
 	}{
 		{name: "canceled", mutate: func(order *models.ShopOrder) { order.Status = "canceled" }},
+		{name: "cancellation requested", mutate: func(order *models.ShopOrder) {
+			order.Status = "cancellation_requested"
+			order.ReturnStatus = "CANCELLATION_REQUESTED"
+		}},
 		{name: "refunded", mutate: func(order *models.ShopOrder) {
 			order.FinancialStatus = "refunded"
 			order.RefundedAmountMinor = order.TotalAmountMinor

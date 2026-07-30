@@ -70,7 +70,7 @@ type checkoutPaymentServiceFactory func(*config.Config) (checkoutPaymentService,
 func NewShopPaymentSheetHandler(cfg *config.Config, db *gorm.DB) http.HandlerFunc {
 	return newShopPaymentSheetHandler(cfg, db, func(cfg *config.Config) (checkoutPaymentService, error) {
 		return payments.NewStripeService(cfg)
-	}, time.Now)
+	}, time.Now, currentShopAccountEmail)
 }
 
 func newShopPaymentSheetHandler(
@@ -78,6 +78,7 @@ func newShopPaymentSheetHandler(
 	db *gorm.DB,
 	paymentFactory checkoutPaymentServiceFactory,
 	now func() time.Time,
+	accountEmailResolver shopAccountEmailResolver,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		EnableCors(&w)
@@ -89,6 +90,15 @@ func newShopPaymentSheetHandler(
 			return
 		}
 		claims, ok := authenticatedShopClaims(w, r)
+		if !ok {
+			return
+		}
+		accountEmail, ok := resolveShopAccountEmail(
+			w,
+			r,
+			claims.UserID,
+			accountEmailResolver,
+		)
 		if !ok {
 			return
 		}
@@ -132,7 +142,10 @@ func newShopPaymentSheetHandler(
 			return
 		}
 		quoteVersion := strings.ToLower(strings.TrimSpace(quoteRecord.SnapshotSHA256))
-		if !strings.EqualFold(strings.TrimSpace(snapshot.Customer.Email), strings.TrimSpace(claims.Email)) {
+		if !strings.EqualFold(
+			strings.TrimSpace(snapshot.Customer.Email),
+			strings.TrimSpace(accountEmail),
+		) {
 			http.Error(w, "Shop quote does not belong to the authenticated account", http.StatusForbidden)
 			return
 		}
@@ -618,6 +631,11 @@ func validateHongKongShipping(shipping ShopCheckoutShippingRequest) error {
 		return err
 	}
 	return nil
+}
+
+func validateHongKongPhone(rawPhone string) error {
+	_, err := normalizeHongKongPhone(rawPhone)
+	return err
 }
 
 // normalizeHongKongPhone is the ONE place a Hong Kong delivery phone is
