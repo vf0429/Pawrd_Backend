@@ -50,12 +50,21 @@ type AdminOrderInput struct {
 }
 
 type AdminOrderResult struct {
-	ID          string
-	LegacyID    string
-	Name        string
-	TotalAmount string
-	Currency    string
-	LineItemIDs []string
+	ID                         string
+	LegacyID                   string
+	Name                       string
+	TotalAmount                string
+	Currency                   string
+	LineItemIDs                []string
+	HasCompleteShippingAddress bool
+}
+
+type AdminShippingAddressInput struct {
+	Name    string
+	Phone   string
+	Address string
+	City    string
+	Region  string
 }
 
 type AdminOrderSnapshot struct {
@@ -65,6 +74,8 @@ type AdminOrderSnapshot struct {
 	TrackingURL         string
 	EstimatedDeliveryAt *time.Time
 	DeliveredAt         *time.Time
+	HasShippingAddress  bool
+	Return              *AdminReturnResult
 }
 
 type AdminReturnResult struct {
@@ -85,6 +96,13 @@ type AdminOrderClient interface {
 // Stripe PaymentIntent source identifier before attempting another create.
 type AdminOrderLookupClient interface {
 	FindOrderBySourceIdentifier(context.Context, string) (*AdminOrderResult, error)
+}
+
+// AdminOrderAddressClient repairs a missing Shopify order shipping address.
+// It is optional so test and alternate AdminOrderClient implementations remain
+// source compatible.
+type AdminOrderAddressClient interface {
+	UpdateOrderShippingAddress(context.Context, string, AdminShippingAddressInput) error
 }
 
 // ErrOrderCreateRejected means Shopify definitively returned a mutation
@@ -498,6 +516,9 @@ func (c *AdminClient) CreateOrder(ctx context.Context, input AdminOrderInput) (*
 	      id legacyResourceId name
 	      totalPriceSet { shopMoney { amount currencyCode } }
 	      lineItems(first: 100) { nodes { id } }
+	      shippingAddress {
+	        firstName lastName phone address1 city provinceCode countryCodeV2
+	      }
 	    }
 	    userErrors { field message }
 	  }
@@ -519,6 +540,7 @@ func (c *AdminClient) CreateOrder(ctx context.Context, input AdminOrderInput) (*
 						ID string `json:"id"`
 					} `json:"nodes"`
 				} `json:"lineItems"`
+				ShippingAddress *adminMailingAddress `json:"shippingAddress"`
 			} `json:"order"`
 			UserErrors []struct {
 				Field   []string `json:"field"`
@@ -553,11 +575,123 @@ func (c *AdminClient) CreateOrder(ctx context.Context, input AdminOrderInput) (*
 		Name:        data.OrderCreate.Order.Name,
 		TotalAmount: data.OrderCreate.Order.TotalPriceSet.ShopMoney.Amount,
 		Currency:    data.OrderCreate.Order.TotalPriceSet.ShopMoney.CurrencyCode,
+		HasCompleteShippingAddress: adminShippingAddressMatches(
+			data.OrderCreate.Order.ShippingAddress,
+			adminShippingAddressInput(input),
+		),
 	}
 	for _, line := range data.OrderCreate.Order.LineItems.Nodes {
 		result.LineItemIDs = append(result.LineItemIDs, line.ID)
 	}
+	if !result.HasCompleteShippingAddress {
+		if err := c.UpdateOrderShippingAddress(
+			ctx,
+			result.ID,
+			adminShippingAddressInput(input),
+		); err != nil {
+			return nil, fmt.Errorf("repair Shopify order shipping address: %w", err)
+		}
+		result.HasCompleteShippingAddress = true
+	}
 	return result, nil
+}
+
+type adminMailingAddress struct {
+	FirstName     string `json:"firstName"`
+	LastName      string `json:"lastName"`
+	Phone         string `json:"phone"`
+	Address1      string `json:"address1"`
+	City          string `json:"city"`
+	ProvinceCode  string `json:"provinceCode"`
+	CountryCodeV2 string `json:"countryCodeV2"`
+}
+
+func adminShippingAddressInput(input AdminOrderInput) AdminShippingAddressInput {
+	return AdminShippingAddressInput{
+		Name: strings.TrimSpace(input.ShippingName), Phone: strings.TrimSpace(input.ShippingPhone),
+		Address: strings.TrimSpace(input.ShippingAddress), City: strings.TrimSpace(input.ShippingCity),
+		Region: strings.TrimSpace(input.ShippingRegion),
+	}
+}
+
+func adminShippingAddressPayload(input AdminShippingAddressInput) map[string]any {
+	return map[string]any{
+		"firstName":    strings.TrimSpace(input.Name),
+		"phone":        strings.TrimSpace(input.Phone),
+		"address1":     strings.TrimSpace(input.Address),
+		"city":         strings.TrimSpace(input.City),
+		"provinceCode": shopifyHongKongProvinceCode(input.Region),
+		"countryCode":  "HK",
+	}
+}
+
+func adminShippingAddressMatches(actual *adminMailingAddress, expected AdminShippingAddressInput) bool {
+	if actual == nil {
+		return false
+	}
+	return strings.TrimSpace(actual.FirstName+" "+actual.LastName) != "" &&
+		strings.TrimSpace(actual.Phone) != "" &&
+		strings.EqualFold(strings.TrimSpace(actual.Address1), strings.TrimSpace(expected.Address)) &&
+		strings.EqualFold(strings.TrimSpace(actual.City), strings.TrimSpace(expected.City)) &&
+		strings.EqualFold(strings.TrimSpace(actual.ProvinceCode), shopifyHongKongProvinceCode(expected.Region)) &&
+		strings.EqualFold(strings.TrimSpace(actual.CountryCodeV2), "HK")
+}
+
+func (c *AdminClient) UpdateOrderShippingAddress(
+	ctx context.Context,
+	orderID string,
+	input AdminShippingAddressInput,
+) error {
+	orderID = strings.TrimSpace(orderID)
+	if !strings.HasPrefix(orderID, "gid://shopify/Order/") {
+		return fmt.Errorf("Shopify order ID is invalid")
+	}
+	if strings.TrimSpace(input.Name) == "" ||
+		strings.TrimSpace(input.Phone) == "" ||
+		strings.TrimSpace(input.Address) == "" ||
+		strings.TrimSpace(input.City) == "" ||
+		strings.TrimSpace(input.Region) == "" {
+		return fmt.Errorf("Shopify shipping address is incomplete")
+	}
+	const mutation = `mutation RepairPawrdOrderShippingAddress($input: OrderInput!) {
+	  orderUpdate(input: $input) {
+	    order {
+	      id
+	      shippingAddress {
+	        firstName lastName phone address1 city provinceCode countryCodeV2
+	      }
+	    }
+	    userErrors { field message }
+	  }
+	}`
+	var data struct {
+		OrderUpdate struct {
+			Order *struct {
+				ID              string               `json:"id"`
+				ShippingAddress *adminMailingAddress `json:"shippingAddress"`
+			} `json:"order"`
+			UserErrors []struct {
+				Message string `json:"message"`
+			} `json:"userErrors"`
+		} `json:"orderUpdate"`
+	}
+	variables := map[string]any{
+		"input": map[string]any{
+			"id":              orderID,
+			"shippingAddress": adminShippingAddressPayload(input),
+		},
+	}
+	if err := c.execute(ctx, mutation, variables, &data); err != nil {
+		return err
+	}
+	if len(data.OrderUpdate.UserErrors) > 0 {
+		return fmt.Errorf("shopify orderUpdate: %s", data.OrderUpdate.UserErrors[0].Message)
+	}
+	if data.OrderUpdate.Order == nil ||
+		!adminShippingAddressMatches(data.OrderUpdate.Order.ShippingAddress, input) {
+		return fmt.Errorf("Shopify orderUpdate did not persist the complete shipping address")
+	}
+	return nil
 }
 
 func shopifyHongKongProvinceCode(region string) string {
@@ -588,6 +722,9 @@ func (c *AdminClient) FindOrderBySourceIdentifier(ctx context.Context, sourceIde
 	      name
 	      totalPriceSet { shopMoney { amount currencyCode } }
 	      lineItems(first: 100) { nodes { id } }
+	      shippingAddress {
+	        firstName lastName phone address1 city provinceCode countryCodeV2
+	      }
 	    }
 	  }
 	}`
@@ -608,6 +745,7 @@ func (c *AdminClient) FindOrderBySourceIdentifier(ctx context.Context, sourceIde
 						ID string `json:"id"`
 					} `json:"nodes"`
 				} `json:"lineItems"`
+				ShippingAddress *adminMailingAddress `json:"shippingAddress"`
 			} `json:"nodes"`
 		} `json:"orders"`
 	}
@@ -627,6 +765,8 @@ func (c *AdminClient) FindOrderBySourceIdentifier(ctx context.Context, sourceIde
 		ID: order.ID, LegacyID: order.LegacyResourceID, Name: order.Name,
 		TotalAmount: order.TotalPriceSet.ShopMoney.Amount,
 		Currency:    order.TotalPriceSet.ShopMoney.CurrencyCode,
+		HasCompleteShippingAddress: order.ShippingAddress != nil &&
+			strings.TrimSpace(order.ShippingAddress.Address1) != "",
 	}
 	for _, line := range order.LineItems.Nodes {
 		result.LineItemIDs = append(result.LineItemIDs, line.ID)
@@ -676,6 +816,10 @@ func (c *AdminClient) FetchOrder(ctx context.Context, orderID string) (*AdminOrd
 	const query = `query PawrdOrderLogistics($id: ID!) {
 	  order(id: $id) {
 	    displayFulfillmentStatus
+	    shippingAddress { address1 }
+	    returns(first: 10, reverse: true) {
+	      nodes { id name status }
+	    }
 	    fulfillments(first: 20) {
 	      nodes {
 	        status displayStatus estimatedDeliveryAt deliveredAt
@@ -687,7 +831,13 @@ func (c *AdminClient) FetchOrder(ctx context.Context, orderID string) (*AdminOrd
 	var data struct {
 		Order *struct {
 			DisplayFulfillmentStatus string `json:"displayFulfillmentStatus"`
-			Fulfillments             struct {
+			ShippingAddress          *struct {
+				Address1 string `json:"address1"`
+			} `json:"shippingAddress"`
+			Returns struct {
+				Nodes []AdminReturnResult `json:"nodes"`
+			} `json:"returns"`
+			Fulfillments struct {
 				Nodes []struct {
 					Status              string     `json:"status"`
 					DisplayStatus       string     `json:"displayStatus"`
@@ -708,7 +858,15 @@ func (c *AdminClient) FetchOrder(ctx context.Context, orderID string) (*AdminOrd
 	if data.Order == nil {
 		return nil, fmt.Errorf("shopify order not found")
 	}
-	snapshot := &AdminOrderSnapshot{FulfillmentStatus: data.Order.DisplayFulfillmentStatus}
+	snapshot := &AdminOrderSnapshot{
+		FulfillmentStatus: data.Order.DisplayFulfillmentStatus,
+		HasShippingAddress: data.Order.ShippingAddress != nil &&
+			strings.TrimSpace(data.Order.ShippingAddress.Address1) != "",
+	}
+	if len(data.Order.Returns.Nodes) > 0 {
+		latestReturn := data.Order.Returns.Nodes[0]
+		snapshot.Return = &latestReturn
+	}
 	if len(data.Order.Fulfillments.Nodes) > 0 {
 		fulfillment := data.Order.Fulfillments.Nodes[0]
 		if fulfillment.DisplayStatus != "" {
@@ -746,6 +904,8 @@ func (c *AdminClient) AddOrderTags(ctx context.Context, orderID string, tags []s
 }
 
 func (c *AdminClient) RequestReturn(ctx context.Context, orderID, reason, note string) (*AdminReturnResult, error) {
+	reason = strings.ToUpper(strings.TrimSpace(reason))
+	note = adminReturnCustomerNote(reason, note)
 	const returnablesQuery = `query PawrdReturnables($orderId: ID!) {
 	  returnableFulfillments(orderId: $orderId, first: 50) {
 	    nodes {
@@ -813,4 +973,14 @@ func (c *AdminClient) RequestReturn(ctx context.Context, orderID, reason, note s
 		return nil, fmt.Errorf("shopify returnRequest returned no return")
 	}
 	return data.ReturnRequest.Return, nil
+}
+
+func adminReturnCustomerNote(reason, note string) string {
+	reason = strings.ToUpper(strings.TrimSpace(reason))
+	note = strings.TrimSpace(note)
+	reasonLine := "Pawrd return reason: " + reason
+	if note == "" {
+		return reasonLine
+	}
+	return reasonLine + "\nCustomer note: " + note
 }

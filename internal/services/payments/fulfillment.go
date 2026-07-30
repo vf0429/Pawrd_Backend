@@ -18,9 +18,10 @@ import (
 type ItemSource string
 
 const (
-	SourceShopify                      ItemSource = "shopify"
-	SourceHiCustom                     ItemSource = "hicustom"
-	shopifyReconciliationFailurePrefix            = "shopify_order_reconciliation_required:"
+	SourceShopify                             ItemSource = "shopify"
+	SourceHiCustom                            ItemSource = "hicustom"
+	shopifyReconciliationFailurePrefix                   = "shopify_order_reconciliation_required:"
+	shopifyAddressReconciliationFailurePrefix            = "shopify_order_reconciliation_required:shipping_address:"
 )
 
 // FulfillmentItem is a parsed line item extracted from Stripe PaymentIntent metadata.
@@ -132,6 +133,22 @@ func (d *Dispatcher) fulfillShopify(req FulfillmentRequest) error {
 		return fmt.Errorf("load shop order: %w", err)
 	}
 	if order.ShopifyOrderGID() != "" {
+		if err := d.repairShopifyOrderShippingAddress(context.Background(), order); err != nil {
+			return fmt.Errorf("repair mapped Shopify order shipping address: %w", err)
+		}
+		if strings.Contains(order.FailureReason, shopifyAddressReconciliationFailurePrefix) {
+			if err := d.db.Model(&models.ShopOrder{}).
+				Where(
+					"id = ? AND status = ? AND failure_reason = ?",
+					order.ID,
+					"reconciliation_required",
+					order.FailureReason,
+				).
+				Updates(map[string]any{"status": "processing", "failure_reason": ""}).Error; err != nil {
+				return fmt.Errorf("clear repaired Shopify address reconciliation: %w", err)
+			}
+			return nil
+		}
 		if strings.Contains(order.FailureReason, shopifyReconciliationFailurePrefix) {
 			return fmt.Errorf("%s", order.FailureReason)
 		}
@@ -183,7 +200,7 @@ func (d *Dispatcher) fulfillShopify(req FulfillmentRequest) error {
 		// that Shopify did not accept the first request.
 		mapped, reconcileErr := d.reconcileShopifyOrder(context.Background(), order)
 		switch {
-		case mapped:
+		case mapped && reconcileErr == nil:
 			return nil
 		case errors.Is(err, shopify.ErrOrderCreateRejected) && reconcileErr == nil:
 			err = fmt.Errorf(
@@ -249,6 +266,29 @@ func (d *Dispatcher) reconcileShopifyOrder(
 	if result == nil {
 		return false, nil
 	}
+	if !result.HasCompleteShippingAddress {
+		if err := d.updateShopifyOrderShippingAddress(ctx, result.ID, order); err != nil {
+			reconciliationErr := fmt.Errorf(
+				"%s repair reconciled Shopify order shipping address: %w",
+				shopifyAddressReconciliationFailurePrefix,
+				err,
+			)
+			if persistErr := d.persistShopifyOrderMapping(
+				order,
+				result,
+				"reconciliation_required",
+				reconciliationErr.Error(),
+			); persistErr != nil {
+				return true, fmt.Errorf(
+					"%v; persist Shopify reconciliation mapping: %w",
+					reconciliationErr,
+					persistErr,
+				)
+			}
+			return true, reconciliationErr
+		}
+		result.HasCompleteShippingAddress = true
+	}
 	if err := d.persistShopifyOrderResult(order, result); err != nil {
 		return true, err
 	}
@@ -298,7 +338,10 @@ func (d *Dispatcher) shopifyOrderInput(order models.ShopOrder) (shopify.AdminOrd
 		for _, item := range snapshot.LineItems {
 			input.Lines = append(input.Lines, shopify.AdminOrderLineInput{
 				VariantID: item.VariantID, Quantity: item.Quantity,
-				RequiresShipping: item.RequiresShipping,
+				// Pawrd checkout accepts only shippable physical variants. Force
+				// the Admin order line to retain that invariant because Shopify
+				// orderCreate defaults requiresShipping to false.
+				RequiresShipping: true,
 				UnitPrice:        minorAmountString(item.UnitAmountMinor),
 			})
 		}
@@ -317,6 +360,41 @@ func (d *Dispatcher) shopifyOrderInput(order models.ShopOrder) (shopify.AdminOrd
 		return shopify.AdminOrderInput{}, fmt.Errorf("load checkout quote for Shopify order: %w", err)
 	}
 	return input, nil
+}
+
+func (d *Dispatcher) repairShopifyOrderShippingAddress(
+	ctx context.Context,
+	order models.ShopOrder,
+) error {
+	return d.updateShopifyOrderShippingAddress(ctx, order.ShopifyOrderGID(), order)
+}
+
+func (d *Dispatcher) updateShopifyOrderShippingAddress(
+	ctx context.Context,
+	orderID string,
+	order models.ShopOrder,
+) error {
+	updater, ok := d.shopifyAdmin.(shopify.AdminOrderAddressClient)
+	if !ok {
+		return nil
+	}
+	if strings.TrimSpace(orderID) == "" ||
+		strings.TrimSpace(order.CustomerName) == "" ||
+		strings.TrimSpace(order.CustomerPhone) == "" ||
+		strings.TrimSpace(order.ShippingAddress1) == "" ||
+		strings.TrimSpace(order.ShippingDistrict) == "" ||
+		strings.TrimSpace(order.ShippingRegion) == "" {
+		return nil
+	}
+	return updater.UpdateOrderShippingAddress(
+		ctx,
+		orderID,
+		shopify.AdminShippingAddressInput{
+			Name: order.CustomerName, Phone: order.CustomerPhone,
+			Address: order.ShippingAddress1, City: order.ShippingDistrict,
+			Region: order.ShippingRegion,
+		},
+	)
 }
 
 func (d *Dispatcher) persistShopifyOrderResult(order models.ShopOrder, result *shopify.AdminOrderResult) error {

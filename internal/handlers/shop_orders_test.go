@@ -415,6 +415,54 @@ func TestShopOrderDetailRefreshUpdatesTrackingWithoutRegressingMoneyStatus(t *te
 	}
 }
 
+func TestShopOrderDetailRefreshReconcilesClosedShopifyReturn(t *testing.T) {
+	db := newShopOrderTestDB(t)
+	order := models.ShopOrder{
+		ID: uuid.NewString(), UserID: "user-1", PaymentIntentID: "pi_return_detail",
+		ShopifyOrderID: shopOrderStringPointer("gid://shopify/Order/return-detail"),
+		Status:         "return_requested", FinancialStatus: "paid",
+		FulfillmentStatus: "DELIVERED", ReturnID: "gid://shopify/Return/1",
+		ReturnName: "#1001-R1", ReturnStatus: "REQUESTED",
+		ReturnReason: "DEFECTIVE", Currency: "HKD", TotalAmountMinor: 1000,
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatal(err)
+	}
+	deliveredAt := time.Now().UTC()
+	admin := &fakeShopifyOrderAdmin{snapshot: &shopify.AdminOrderSnapshot{
+		FulfillmentStatus:  "DELIVERED",
+		HasShippingAddress: true,
+		DeliveredAt:        &deliveredAt,
+		Return: &shopify.AdminReturnResult{
+			ID: "gid://shopify/Return/1", Name: "#1001-R1", Status: "CLOSED",
+		},
+	}}
+	req := authorizedShopRequest(
+		t,
+		http.MethodGet,
+		"/api/shop/orders/"+order.ID,
+		"user-1",
+		nil,
+	)
+	req.SetPathValue("orderID", order.ID)
+	rec := httptest.NewRecorder()
+
+	NewShopOrderDetailHandler(db, admin).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail response=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var stored models.ShopOrder
+	if err := db.First(&stored, "id = ?", order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "return_closed" ||
+		stored.ReturnStatus != "CLOSED" ||
+		stored.ReturnReason != "DEFECTIVE" {
+		t.Fatalf("Shopify return state was not reconciled: %+v", stored)
+	}
+}
+
 func TestShopOrderCustomerWritesDoNotOverwriteConcurrentMoneyTerminal(t *testing.T) {
 	t.Run("receipt", func(t *testing.T) {
 		db := newShopOrderTestDB(t)

@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -101,12 +102,39 @@ func NewShopOrderDetailHandler(db *gorm.DB, admin shopify.AdminOrderClient) http
 					"estimated_delivery_at": snapshot.EstimatedDeliveryAt,
 					"delivered_at":          snapshot.DeliveredAt,
 				}
-				if snapshot.DeliveredAt != nil {
+				if snapshot.Return != nil {
+					updates["return_id"] = snapshot.Return.ID
+					updates["return_name"] = snapshot.Return.Name
+					updates["return_status"] = snapshot.Return.Status
+					updates["status"] = shopOrderStatusUnlessProtected(
+						"return_" + strings.ToLower(snapshot.Return.Status),
+					)
+				} else if snapshot.DeliveredAt != nil {
 					updates["status"] = shopOrderLogisticsStatusUnlessProtected("delivered")
 				} else if snapshot.TrackingNumber != "" {
 					updates["status"] = shopOrderLogisticsStatusUnlessProtected("shipped")
 				}
 				_ = db.Model(order).Updates(updates).Error
+				if !snapshot.HasShippingAddress {
+					if updater, ok := admin.(shopify.AdminOrderAddressClient); ok {
+						address := shopify.AdminShippingAddressInput{
+							Name: order.CustomerName, Phone: order.CustomerPhone,
+							Address: order.ShippingAddress1, City: order.ShippingDistrict,
+							Region: order.ShippingRegion,
+						}
+						if err := updater.UpdateOrderShippingAddress(
+							r.Context(),
+							shopifyOrderID,
+							address,
+						); err != nil {
+							log.Printf(
+								"[shopify] repair shipping address order=%s: %v",
+								order.ID,
+								err,
+							)
+						}
+					}
+				}
 				_ = db.Preload("Items").First(order, "id = ?", order.ID).Error
 			}
 		}

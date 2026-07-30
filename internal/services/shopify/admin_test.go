@@ -197,7 +197,10 @@ func TestCreateOrderUsesSafeTagsAndSourceIdentifier(t *testing.T) {
 			"legacyResourceId":"1",
 			"name":"#1001",
 			"totalPriceSet":{"shopMoney":{"amount":"25.02","currencyCode":"HKD"}},
-			"lineItems":{"nodes":[{"id":"gid://shopify/LineItem/1"}]}
+			"lineItems":{"nodes":[{"id":"gid://shopify/LineItem/1"}]},
+			"shippingAddress":{"firstName":"Alice Test","phone":"+85261234567",
+				"address1":"1 Test Street","city":"Wan Chai",
+				"provinceCode":"HK","countryCodeV2":"HK"}
 		},"userErrors":[]}}}`))
 	}))
 	defer server.Close()
@@ -365,7 +368,10 @@ func TestCreateOrderReplicatesFreeShippingCode(t *testing.T) {
 		_, _ = w.Write([]byte(`{"data":{"orderCreate":{"order":{
 			"id":"gid://shopify/Order/1","legacyResourceId":"1","name":"#1001",
 			"totalPriceSet":{"shopMoney":{"amount":"20.00","currencyCode":"HKD"}},
-			"lineItems":{"nodes":[{"id":"gid://shopify/LineItem/1"}]}
+			"lineItems":{"nodes":[{"id":"gid://shopify/LineItem/1"}]},
+			"shippingAddress":{"firstName":"Alice","phone":"+85261234567",
+				"address1":"1 Test Street","city":"Wan Chai",
+				"provinceCode":"HK","countryCodeV2":"HK"}
 		},"userErrors":[]}}}`))
 	}))
 	defer server.Close()
@@ -373,7 +379,10 @@ func TestCreateOrderReplicatesFreeShippingCode(t *testing.T) {
 	client := newTestAdminClient(server, &adminTokenProvider{staticToken: "static-token"})
 	if _, err := client.CreateOrder(context.Background(), AdminOrderInput{
 		Currency: "HKD", Amount: "20.00", PaymentID: "pi_free_shipping",
-		ShippingTitle: "Standard", ShippingAmount: "0.00",
+		ShippingName: "Alice", ShippingPhone: "+85261234567",
+		ShippingAddress: "1 Test Street", ShippingCity: "Wan Chai",
+		ShippingRegion: "Hong Kong Island",
+		ShippingTitle:  "Standard", ShippingAmount: "0.00",
 		DiscountCode: "SHIPFREE", DiscountTargetType: "SHIPPING_LINE",
 		Lines: []AdminOrderLineInput{{
 			VariantID: "gid://shopify/ProductVariant/1", Quantity: 1,
@@ -406,7 +415,10 @@ func TestCreateOrderPreservesPartialShippingDiscountAsFixedAmount(t *testing.T) 
 		_, _ = w.Write([]byte(`{"data":{"orderCreate":{"order":{
 			"id":"gid://shopify/Order/2","legacyResourceId":"2","name":"#1002",
 			"totalPriceSet":{"shopMoney":{"amount":"23.00","currencyCode":"HKD"}},
-			"lineItems":{"nodes":[{"id":"gid://shopify/LineItem/2"}]}
+			"lineItems":{"nodes":[{"id":"gid://shopify/LineItem/2"}]},
+			"shippingAddress":{"firstName":"Alice","phone":"+85261234567",
+				"address1":"1 Test Street","city":"Wan Chai",
+				"provinceCode":"HK","countryCodeV2":"HK"}
 		},"userErrors":[]}}}`))
 	}))
 	defer server.Close()
@@ -414,7 +426,10 @@ func TestCreateOrderPreservesPartialShippingDiscountAsFixedAmount(t *testing.T) 
 	client := newTestAdminClient(server, &adminTokenProvider{staticToken: "static-token"})
 	if _, err := client.CreateOrder(context.Background(), AdminOrderInput{
 		Currency: "HKD", Amount: "23.00", PaymentID: "pi_partial_shipping",
-		ShippingTitle: "Standard", ShippingAmount: "5.00",
+		ShippingName: "Alice", ShippingPhone: "+85261234567",
+		ShippingAddress: "1 Test Street", ShippingCity: "Wan Chai",
+		ShippingRegion: "Hong Kong Island",
+		ShippingTitle:  "Standard", ShippingAmount: "5.00",
 		DiscountCode: "SHIP2", DiscountAmount: "2.00",
 		DiscountTargetType: "SHIPPING_LINE",
 		Lines: []AdminOrderLineInput{{
@@ -440,6 +455,130 @@ func TestCreateOrderPreservesPartialShippingDiscountAsFixedAmount(t *testing.T) 
 	if !ok || attribute["key"] != "Pawrd original discount target" ||
 		attribute["value"] != "SHIPPING_LINE" {
 		t.Fatalf("unexpected partial shipping audit attribute: %#v", attributes[0])
+	}
+}
+
+func TestCreateOrderRepairsMissingShippingAddress(t *testing.T) {
+	var calls int
+	var repairedAddress map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var request struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(request.Query, "RepairPawrdOrderShippingAddress") {
+			input := request.Variables["input"].(map[string]any)
+			repairedAddress = input["shippingAddress"].(map[string]any)
+			_, _ = w.Write([]byte(`{"data":{"orderUpdate":{"order":{
+				"id":"gid://shopify/Order/9",
+				"shippingAddress":{"firstName":"Alice","phone":"+85261234567",
+					"address1":"9 Test Street","city":"Kowloon City",
+					"provinceCode":"KLN","countryCodeV2":"HK"}
+			},"userErrors":[]}}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"orderCreate":{"order":{
+			"id":"gid://shopify/Order/9","legacyResourceId":"9","name":"#1009",
+			"totalPriceSet":{"shopMoney":{"amount":"20.00","currencyCode":"HKD"}},
+			"lineItems":{"nodes":[{"id":"gid://shopify/LineItem/9"}]},
+			"shippingAddress":null
+		},"userErrors":[]}}}`))
+	}))
+	defer server.Close()
+
+	client := newTestAdminClient(server, &adminTokenProvider{staticToken: "static-token"})
+	result, err := client.CreateOrder(context.Background(), AdminOrderInput{
+		Currency: "HKD", Amount: "20.00", PaymentID: "pi_address_repair",
+		ShippingName: "Alice", ShippingPhone: "+85261234567",
+		ShippingAddress: "9 Test Street", ShippingCity: "Kowloon City",
+		ShippingRegion: "Kowloon",
+		Lines: []AdminOrderLineInput{{
+			VariantID: "gid://shopify/ProductVariant/9", Quantity: 1,
+			RequiresShipping: true, UnitPrice: "20.00",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || !result.HasCompleteShippingAddress {
+		t.Fatalf("missing address was not repaired: calls=%d result=%+v", calls, result)
+	}
+	if repairedAddress["address1"] != "9 Test Street" ||
+		repairedAddress["city"] != "Kowloon City" ||
+		repairedAddress["provinceCode"] != "KLN" ||
+		repairedAddress["countryCode"] != "HK" {
+		t.Fatalf("unexpected repaired address: %#v", repairedAddress)
+	}
+}
+
+func TestRequestReturnAlwaysMakesReasonVisibleInCustomerNote(t *testing.T) {
+	var returnInput map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(request.Query, "PawrdReturnables") {
+			_, _ = w.Write([]byte(`{"data":{"returnableFulfillments":{"nodes":[{
+				"returnableFulfillmentLineItems":{"nodes":[{
+					"quantity":1,
+					"fulfillmentLineItem":{"id":"gid://shopify/FulfillmentLineItem/1"}
+				}]}
+			}]}}}`))
+			return
+		}
+		returnInput = request.Variables["input"].(map[string]any)
+		_, _ = w.Write([]byte(`{"data":{"returnRequest":{"return":{
+			"id":"gid://shopify/Return/1","name":"#1001-R1","status":"REQUESTED"
+		},"userErrors":[]}}}`))
+	}))
+	defer server.Close()
+
+	client := newTestAdminClient(server, &adminTokenProvider{staticToken: "static-token"})
+	if _, err := client.RequestReturn(
+		context.Background(),
+		"gid://shopify/Order/1",
+		"DEFECTIVE",
+		"",
+	); err != nil {
+		t.Fatal(err)
+	}
+	items := returnInput["returnLineItems"].([]any)
+	item := items[0].(map[string]any)
+	if item["returnReason"] != "DEFECTIVE" ||
+		item["customerNote"] != "Pawrd return reason: DEFECTIVE" {
+		t.Fatalf("return reason is not visible in Shopify payload: %#v", item)
+	}
+}
+
+func TestFetchOrderReturnsLatestReturnAndAddressPresence(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"order":{
+			"displayFulfillmentStatus":"FULFILLED",
+			"shippingAddress":{"address1":"1 Test Street"},
+			"returns":{"nodes":[{
+				"id":"gid://shopify/Return/1","name":"#1001-R1","status":"CLOSED"
+			}]},
+			"fulfillments":{"nodes":[]}
+		}}}`))
+	}))
+	defer server.Close()
+
+	client := newTestAdminClient(server, &adminTokenProvider{staticToken: "static-token"})
+	snapshot, err := client.FetchOrder(context.Background(), "gid://shopify/Order/1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.HasShippingAddress || snapshot.Return == nil ||
+		snapshot.Return.Status != "CLOSED" {
+		t.Fatalf("unexpected Shopify order snapshot: %+v", snapshot)
 	}
 }
 

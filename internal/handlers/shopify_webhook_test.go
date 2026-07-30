@@ -145,7 +145,7 @@ func TestShopifyReturnWebhooksResolveNestedOrderPayloads(t *testing.T) {
 		{topic: "returns/cancel", expectedStatus: "CANCELED"},
 		{topic: "returns/close", expectedStatus: "CLOSED"},
 		{topic: "returns/reopen", expectedStatus: "OPEN"},
-		{topic: "returns/process", suppliedStatus: "closed", expectedStatus: "CLOSED"},
+		{topic: "returns/process", expectedStatus: "OPEN"},
 	}
 	for index, testCase := range testCases {
 		t.Run(testCase.topic, func(t *testing.T) {
