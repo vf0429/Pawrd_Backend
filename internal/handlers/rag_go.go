@@ -119,15 +119,17 @@ func NewGoRAGReadyzHandler() http.HandlerFunc {
 			runtime = "degraded"
 		}
 		respondGoRAGJSON(w, status, map[string]any{
-			"ok":               report.OK,
-			"service":          "go_rag_translation_skeleton",
-			"runtime":          runtime,
-			"implementation":   "go",
-			"llm_configured":   report.LLMConfigured,
-			"data_path":        report.DataPath,
-			"corpus_available": report.CorpusAvailable,
-			"chunk_count":      report.ChunkCount,
-			"issues":           report.Issues,
+			"ok":                   report.OK,
+			"service":              "go_rag_translation_skeleton",
+			"runtime":              runtime,
+			"implementation":       "go",
+			"llm_configured":       report.LLMConfigured,
+			"embedding_enabled":    report.EmbeddingEnabled,
+			"embedding_configured": report.EmbeddingConfigured,
+			"data_path":            report.DataPath,
+			"corpus_available":     report.CorpusAvailable,
+			"chunk_count":          report.ChunkCount,
+			"issues":               report.Issues,
 		})
 	}
 }

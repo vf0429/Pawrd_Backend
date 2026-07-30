@@ -117,7 +117,10 @@ class PrototypeConfig:
             request_timeout_seconds=_env_float("HK_INSURANCE_RAG_REQUEST_TIMEOUT_SECONDS", 120.0),
             request_max_retries=_env_int("HK_INSURANCE_RAG_REQUEST_MAX_RETRIES", 3),
             embedding_base_url=_env_or_default("HK_INSURANCE_RAG_EMBEDDING_BASE_URL", report_agent_base_url),
-            embedding_model=_env_or_default("HK_INSURANCE_RAG_EMBEDDING_MODEL", "BAAI/bge-m3"),
+            embedding_model=_env_or_default(
+                "HK_INSURANCE_RAG_EMBEDDING_MODEL",
+                "Qwen/Qwen3-Embedding-8B",
+            ),
             embedding_api_key=_env_or_default("HK_INSURANCE_RAG_EMBEDDING_API_KEY", report_agent_api_key),
             rerank_enabled=_env_bool("HK_INSURANCE_RAG_RERANK_ENABLED", True),
             rerank_base_url=_env_or_default("HK_INSURANCE_RAG_RERANK_BASE_URL", report_agent_base_url),
@@ -132,9 +135,12 @@ class PrototypeConfig:
                     "coverage statement, exclusion, or payout condition over related add-on or nearby clauses."
                 ),
             ),
-            llm_base_url=_env_or_default("HK_INSURANCE_RAG_LLM_BASE_URL", report_agent_base_url),
-            llm_model=_env_or_default("HK_INSURANCE_RAG_LLM_MODEL", "stepfun-ai/Step-3.5-Flash"),
-            llm_api_key=_env_or_default("HK_INSURANCE_RAG_LLM_API_KEY", report_agent_api_key),
+            llm_base_url=_env_or_default(
+                "HK_INSURANCE_RAG_LLM_BASE_URL",
+                "https://api.stepfun.com/step_plan/v1",
+            ),
+            llm_model=_env_or_default("HK_INSURANCE_RAG_LLM_MODEL", "step-3.5-flash"),
+            llm_api_key=os.getenv("HK_INSURANCE_RAG_LLM_API_KEY", "").strip(),
         )
 
     def validate(self) -> None:

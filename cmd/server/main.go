@@ -18,6 +18,7 @@ import (
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/merchant"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/payments"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/places"
+	"github.com/wangwuxing777/Pawrd_Backend/internal/services/raggo"
 	"github.com/wangwuxing777/Pawrd_Backend/internal/services/shopify"
 )
 
@@ -370,6 +371,18 @@ func main() {
 	mux.Handle("/api/v1/", v1Handler)
 
 	startBookingReconcileLoop(port)
+	go func() {
+		ragCfg := raggo.LoadConfig()
+		if !ragCfg.EmbeddingEnabled {
+			return
+		}
+		log.Printf("Warming hybrid RAG vector index with model %s", ragCfg.EmbeddingModel)
+		if err := raggo.WarmVectorIndex(ragCfg); err != nil {
+			log.Printf("Hybrid RAG vector warmup failed; lexical retrieval remains available: %v", err)
+			return
+		}
+		log.Printf("Hybrid RAG vector index ready")
+	}()
 
 	fmt.Printf("PetWell Backend running at http://localhost:%s\n", port)
 	server := &http.Server{

@@ -6,24 +6,32 @@ import (
 )
 
 type ReadinessReport struct {
-	OK              bool     `json:"ok"`
-	LLMConfigured   bool     `json:"llm_configured"`
-	DataPath        string   `json:"data_path"`
-	CorpusAvailable bool     `json:"corpus_available"`
-	ChunkCount      int      `json:"chunk_count"`
-	Issues          []string `json:"issues,omitempty"`
+	OK                  bool     `json:"ok"`
+	LLMConfigured       bool     `json:"llm_configured"`
+	EmbeddingEnabled    bool     `json:"embedding_enabled"`
+	EmbeddingConfigured bool     `json:"embedding_configured"`
+	DataPath            string   `json:"data_path"`
+	CorpusAvailable     bool     `json:"corpus_available"`
+	ChunkCount          int      `json:"chunk_count"`
+	Issues              []string `json:"issues,omitempty"`
 }
 
 func BuildReadinessReport(cfg Config) ReadinessReport {
 	report := ReadinessReport{
-		OK:            true,
-		LLMConfigured: strings.TrimSpace(cfg.LLMBaseURL) != "" && strings.TrimSpace(cfg.LLMModel) != "" && strings.TrimSpace(cfg.LLMAPIKey) != "",
-		DataPath:      cfg.DataPath,
+		OK:                  true,
+		LLMConfigured:       strings.TrimSpace(cfg.LLMBaseURL) != "" && strings.TrimSpace(cfg.LLMModel) != "" && strings.TrimSpace(cfg.LLMAPIKey) != "",
+		EmbeddingEnabled:    cfg.EmbeddingEnabled,
+		EmbeddingConfigured: strings.TrimSpace(cfg.EmbeddingBaseURL) != "" && strings.TrimSpace(cfg.EmbeddingModel) != "" && strings.TrimSpace(cfg.EmbeddingAPIKey) != "",
+		DataPath:            cfg.DataPath,
 	}
 
 	if !report.LLMConfigured {
 		report.OK = false
 		report.Issues = append(report.Issues, "missing HK_INSURANCE_RAG_LLM_* configuration")
+	}
+	if report.EmbeddingEnabled && !report.EmbeddingConfigured {
+		report.OK = false
+		report.Issues = append(report.Issues, "embedding enabled but HK_INSURANCE_RAG_EMBEDDING_* configuration is incomplete")
 	}
 
 	if strings.TrimSpace(cfg.DataPath) == "" {
