@@ -3,7 +3,7 @@ package models
 import (
 	"fmt"
 	"log"
-	"os"
+	"strings"
 
 	"github.com/wangwuxing777/Pawrd_Backend/internal/config"
 	"gorm.io/driver/postgres"
@@ -15,7 +15,10 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 	var db *gorm.DB
 	var err error
 
-	dsn := os.Getenv("DATABASE_URL")
+	dsn := ""
+	if cfg != nil {
+		dsn = strings.TrimSpace(cfg.DatabaseURL)
+	}
 	if dsn != "" {
 		log.Println("DATABASE_URL variable found, connecting to PostgreSQL...")
 		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
@@ -67,6 +70,11 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 		&ShopOrder{},
 		&ShopOrderItem{},
 		&ShopIntegrationEvent{},
+		&ShopCheckoutQuote{},
+		&ShopRefund{},
+		&ShopCompensationRefundJob{},
+		&ShopRefundMirrorJob{},
+		&ShopFulfillmentJob{},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to auto migrate schema: %w", err)
@@ -78,9 +86,12 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 	// If using PostgreSQL, migrate Auth schema to the same database
 	if dsn != "" {
 		log.Println("Migrating Auth schema to PostgreSQL database...")
-		err = db.AutoMigrate(&AuthUser{})
+		err = db.AutoMigrate(&AuthUser{}, &Verification{})
 		if err != nil {
 			return nil, fmt.Errorf("failed to auto migrate auth schema: %w", err)
+		}
+		if err := normalizeLegacyAuthUsernameColumn(db); err != nil {
+			return nil, fmt.Errorf("failed to normalize legacy auth username schema: %w", err)
 		}
 		AuthDB = db
 	}
@@ -90,9 +101,18 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 }
 
 func normalizePendingShopOrderIDs(db *gorm.DB) error {
-	return db.Model(&ShopOrder{}).
+	// Empty strings in unique-indexed nullable columns must be NULL so multiple
+	// pending rows don't collide (SQLite treats "" as a real value; Postgres
+	// allows many NULLs). Applies to orders written before the columns became
+	// nullable.
+	if err := db.Model(&ShopOrder{}).
 		Where("shopify_order_id = ?", "").
-		Update("shopify_order_id", nil).Error
+		Update("shopify_order_id", nil).Error; err != nil {
+		return err
+	}
+	return db.Model(&ShopOrder{}).
+		Where("payment_intent_id = ?", "").
+		Update("payment_intent_id", nil).Error
 }
 
 // InitAuthDB opens a separate SQLite database for user authentication
@@ -109,6 +129,9 @@ func InitAuthDB() error {
 		return fmt.Errorf("failed to connect auth database: %w", err)
 	}
 
+	if err := normalizeLegacyAuthUsernameColumn(db); err != nil {
+		return fmt.Errorf("failed to validate legacy auth username schema: %w", err)
+	}
 	err = db.AutoMigrate(&AuthUser{}, &Verification{})
 	if err != nil {
 		return fmt.Errorf("failed to auto migrate auth schema: %w", err)

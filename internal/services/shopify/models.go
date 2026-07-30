@@ -73,14 +73,16 @@ type SelectedOption struct {
 
 // Variant represents a product variant
 type Variant struct {
-	ID               string           `json:"id"`
-	Title            string           `json:"title"`
-	SKU              string           `json:"sku"`
-	Price            Money            `json:"price"`
-	CompareAtPrice   *Money           `json:"compareAtPrice,omitempty"`
-	Image            *Image           `json:"image,omitempty"`
-	SelectedOptions  []SelectedOption `json:"selectedOptions,omitempty"`
-	AvailableForSale bool             `json:"availableForSale"`
+	ID                string           `json:"id"`
+	Title             string           `json:"title"`
+	SKU               string           `json:"sku"`
+	Price             Money            `json:"price"`
+	CompareAtPrice    *Money           `json:"compareAtPrice,omitempty"`
+	Image             *Image           `json:"image,omitempty"`
+	SelectedOptions   []SelectedOption `json:"selectedOptions,omitempty"`
+	AvailableForSale  bool             `json:"availableForSale"`
+	RequiresShipping  bool             `json:"requiresShipping"`
+	QuantityAvailable *int             `json:"quantityAvailable,omitempty"`
 }
 
 // ProductResponse is the response structure for product queries

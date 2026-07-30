@@ -5,39 +5,48 @@ import "time"
 // ShopOrder is Pawrd's durable mirror of a paid Shopify order. Stripe remains
 // the payment processor; Shopify is used for merchant operations and returns.
 type ShopOrder struct {
-	ID                   string  `gorm:"primaryKey;size:36"`
-	UserID               string  `gorm:"index;size:36;not null"`
-	PaymentIntentID      string  `gorm:"uniqueIndex;size:255;not null"`
-	ShopifyOrderID       *string `gorm:"uniqueIndex;size:255"`
-	ShopifyOrderLegacyID string  `gorm:"index;size:64"`
-	ShopifyOrderName     string  `gorm:"size:64"`
-	Status               string  `gorm:"index;size:32;not null"`
-	FinancialStatus      string  `gorm:"size:32"`
-	FulfillmentStatus    string  `gorm:"size:32"`
-	Currency             string  `gorm:"size:8;not null"`
-	TotalAmountMinor     int64   `gorm:"not null"`
-	CustomerName         string  `gorm:"size:160"`
-	CustomerEmail        string  `gorm:"size:254"`
-	CustomerPhone        string  `gorm:"size:32"`
-	ShippingAddress1     string  `gorm:"size:255"`
-	ShippingDistrict     string  `gorm:"size:100"`
-	ShippingRegion       string  `gorm:"size:100"`
-	ShippingCountry      string  `gorm:"size:100"`
-	TrackingCompany      string  `gorm:"size:120"`
-	TrackingNumber       string  `gorm:"size:160"`
-	TrackingURL          string  `gorm:"size:500"`
-	EstimatedDeliveryAt  *time.Time
-	DeliveredAt          *time.Time
-	CustomerReceivedAt   *time.Time
-	ReturnID             string          `gorm:"size:255"`
-	ReturnName           string          `gorm:"size:64"`
-	ReturnStatus         string          `gorm:"size:32"`
-	ReturnReason         string          `gorm:"size:32"`
-	ReturnNote           string          `gorm:"size:500"`
-	FailureReason        string          `gorm:"size:1000"`
-	Items                []ShopOrderItem `gorm:"foreignKey:OrderID;constraint:OnDelete:CASCADE"`
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	ID                       string  `gorm:"primaryKey;size:36"`
+	UserID                   string  `gorm:"index;size:36;not null"`
+	PaymentIntentID          *string `gorm:"uniqueIndex;size:255"`
+	ShopifyOrderID           *string `gorm:"uniqueIndex;size:255"`
+	ShopifyOrderLegacyID     string  `gorm:"index;size:64"`
+	ShopifyOrderName         string  `gorm:"size:64"`
+	Status                   string  `gorm:"index;size:32;not null"`
+	FinancialStatus          string  `gorm:"size:32"`
+	FulfillmentStatus        string  `gorm:"size:32"`
+	FulfillmentRequestStatus string  `gorm:"index;size:32"`
+	FulfillmentRequestError  string  `gorm:"size:1000"`
+	FulfillmentRequestedAt   *time.Time
+	Currency                 string `gorm:"size:8;not null"`
+	TotalAmountMinor         int64  `gorm:"not null"`
+	RefundedAmountMinor      int64  `gorm:"not null;default:0"`
+	DisputeID                string `gorm:"index;size:255"`
+	DisputeStatus            string `gorm:"index;size:32"`
+	DisputeEventCreated      int64  `gorm:"not null;default:0"`
+	DisputeReason            string `gorm:"size:64"`
+	DisputedAmountMinor      int64  `gorm:"not null;default:0"`
+	CustomerName             string `gorm:"size:160"`
+	CustomerEmail            string `gorm:"size:254"`
+	CustomerPhone            string `gorm:"size:32"`
+	ShippingAddress1         string `gorm:"size:255"`
+	ShippingDistrict         string `gorm:"size:100"`
+	ShippingRegion           string `gorm:"size:100"`
+	ShippingCountry          string `gorm:"size:100"`
+	TrackingCompany          string `gorm:"size:120"`
+	TrackingNumber           string `gorm:"size:160"`
+	TrackingURL              string `gorm:"size:500"`
+	EstimatedDeliveryAt      *time.Time
+	DeliveredAt              *time.Time
+	CustomerReceivedAt       *time.Time
+	ReturnID                 string          `gorm:"size:255"`
+	ReturnName               string          `gorm:"size:64"`
+	ReturnStatus             string          `gorm:"size:32"`
+	ReturnReason             string          `gorm:"size:32"`
+	ReturnNote               string          `gorm:"size:500"`
+	FailureReason            string          `gorm:"size:1000"`
+	Items                    []ShopOrderItem `gorm:"foreignKey:OrderID;constraint:OnDelete:CASCADE"`
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
 }
 
 // ShopifyOrderGID returns the Shopify Admin GraphQL order ID when fulfillment
@@ -48,6 +57,17 @@ func (o ShopOrder) ShopifyOrderGID() string {
 		return ""
 	}
 	return *o.ShopifyOrderID
+}
+
+// PaymentIntentIDValue returns the Stripe PaymentIntent ID, or "" while the
+// order waits for the intent to be created. The column is NULL (not "") so the
+// unique index tolerates any number of pre-intent orders in both Postgres and
+// SQLite — same pattern as ShopifyOrderID.
+func (o ShopOrder) PaymentIntentIDValue() string {
+	if o.PaymentIntentID == nil {
+		return ""
+	}
+	return *o.PaymentIntentID
 }
 
 type ShopOrderItem struct {

@@ -10,7 +10,7 @@ import (
 
 type Family struct {
 	ID          string         `gorm:"type:text;primaryKey" json:"id"`
-	OwnerUserID string         `gorm:"type:text;not null;index" json:"owner_user_id"`
+	OwnerUserID string         `gorm:"type:text;not null;uniqueIndex" json:"owner_user_id"`
 	DisplayName string         `gorm:"type:text;not null" json:"display_name"`
 	Handle      string         `gorm:"type:text;uniqueIndex;not null" json:"handle"`
 	AvatarURL   string         `gorm:"type:text;default:''" json:"avatar_url"`
@@ -56,7 +56,8 @@ func (m *FamilyMember) BeforeCreate(tx *gorm.DB) error {
 
 type Pet struct {
 	ID                   string               `gorm:"type:text;primaryKey" json:"id"`
-	FamilyID             string               `gorm:"type:text;not null;index" json:"family_id"`
+	FamilyID             string               `gorm:"type:text;not null;index;uniqueIndex:idx_pet_family_client_pet" json:"family_id"`
+	ClientPetID          *string              `gorm:"type:text;uniqueIndex:idx_pet_family_client_pet" json:"client_pet_id,omitempty"`
 	Name                 string               `gorm:"type:text;not null" json:"name"`
 	Species              string               `gorm:"type:text;not null" json:"species"`
 	Breed                string               `gorm:"type:text;default:''" json:"breed"`

@@ -131,7 +131,9 @@ func AnswerQuery(cfg Config, question, provider, language string, maxSources int
 			Implementation: "go_rag_llm_summary_v1",
 		}
 	}
-	candidates := rankCandidates(chunks, question, provider, language, maxSources)
+	lexicalCandidates := rankCandidates(chunks, question, provider, language, maxSources)
+	vectorCandidates, _ := vectorRankCandidates(cfg, chunks, question, provider, language, maxSources)
+	candidates := fuseCandidates(lexicalCandidates, vectorCandidates)
 	candidates = rerankCandidates(cfg, question, candidates)
 	candidates = dedupeCandidates(candidates)
 	candidates = collapseStructuredCandidates(candidates)
@@ -831,6 +833,14 @@ func rankCandidates(chunks []Chunk, question, provider, language string, maxSour
 		return out[i].score > out[j].score
 	})
 
+	limit := candidatePoolLimit(maxSources)
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func candidatePoolLimit(maxSources int) int {
 	limit := 12
 	if maxSources > 0 {
 		limit = maxSources * 4
@@ -838,10 +848,66 @@ func rankCandidates(chunks []Chunk, question, provider, language string, maxSour
 			limit = 12
 		}
 	}
-	if len(out) > limit {
-		out = out[:limit]
+	return limit
+}
+
+// fuseCandidates combines lexical and vector rankings with reciprocal-rank
+// fusion. This keeps exact policy terms strong while allowing semantic matches
+// to enter the candidate pool when users use different wording.
+func fuseCandidates(lexical, vector []rankedChunk) []rankedChunk {
+	if len(vector) == 0 {
+		return lexical
 	}
+	if len(lexical) == 0 {
+		return vector
+	}
+	type fusedItem struct {
+		candidate rankedChunk
+		score     float64
+		bestRank  int
+	}
+	items := map[string]*fusedItem{}
+	addRanking := func(candidates []rankedChunk) {
+		for rank, candidate := range candidates {
+			key := chunkIdentity(candidate.chunk)
+			item, ok := items[key]
+			if !ok {
+				item = &fusedItem{candidate: candidate, bestRank: rank}
+				items[key] = item
+			}
+			item.score += 1.0 / float64(60+rank+1)
+			if rank < item.bestRank {
+				item.bestRank = rank
+			}
+		}
+	}
+	addRanking(lexical)
+	addRanking(vector)
+
+	out := make([]rankedChunk, 0, len(items))
+	for _, item := range items {
+		item.candidate.score = item.score * 1000
+		out = append(out, item.candidate)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if math.Abs(out[i].score-out[j].score) < 1e-9 {
+			return chunkIdentity(out[i].chunk) < chunkIdentity(out[j].chunk)
+		}
+		return out[i].score > out[j].score
+	})
 	return out
+}
+
+func chunkIdentity(ch Chunk) string {
+	return strings.Join([]string{
+		ch.Metadata["provider"],
+		ch.Metadata["language"],
+		ch.Metadata["product"],
+		ch.Metadata["source_name"],
+		ch.Metadata["section_path"],
+		ch.Metadata["clauses"],
+		ch.Text,
+	}, "\x00")
 }
 
 func trimCandidates(candidates []rankedChunk, maxSources int) []rankedChunk {
@@ -1292,6 +1358,13 @@ func BuildCapabilities(cfg Config) map[string]any {
 		"summarization": map[string]any{
 			"mode":           "retrieval_plus_llm_summary",
 			"llm_configured": strings.TrimSpace(cfg.LLMBaseURL) != "" && strings.TrimSpace(cfg.LLMModel) != "" && strings.TrimSpace(cfg.LLMAPIKey) != "",
+		},
+		"retrieval": map[string]any{
+			"mode":                 map[bool]string{true: "hybrid_lexical_vector", false: "lexical"}[cfg.EmbeddingEnabled],
+			"embedding_enabled":    cfg.EmbeddingEnabled,
+			"embedding_configured": strings.TrimSpace(cfg.EmbeddingBaseURL) != "" && strings.TrimSpace(cfg.EmbeddingModel) != "" && strings.TrimSpace(cfg.EmbeddingAPIKey) != "",
+			"embedding_model":      cfg.EmbeddingModel,
+			"rerank_enabled":       cfg.RerankEnabled,
 		},
 		"index": map[string]any{
 			"persist_dir":                cfg.PersistDir,

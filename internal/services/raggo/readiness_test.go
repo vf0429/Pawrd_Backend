@@ -40,6 +40,25 @@ func TestBuildReadinessReportFlagsMissingCorpusPath(t *testing.T) {
 	}
 }
 
+func TestBuildReadinessReportFlagsIncompleteEnabledEmbedding(t *testing.T) {
+	cfg := LoadConfig()
+	cfg.EmbeddingEnabled = true
+	cfg.EmbeddingBaseURL = ""
+	cfg.EmbeddingModel = ""
+	cfg.EmbeddingAPIKey = ""
+
+	report := BuildReadinessReport(cfg)
+	if report.OK {
+		t.Fatalf("expected readiness failure when enabled embedding config is incomplete")
+	}
+	if !report.EmbeddingEnabled || report.EmbeddingConfigured {
+		t.Fatalf("unexpected embedding readiness state: %#v", report)
+	}
+	if !strings.Contains(strings.Join(report.Issues, " | "), "EMBEDDING") {
+		t.Fatalf("expected embedding issue, got %#v", report.Issues)
+	}
+}
+
 func TestBuildReadinessReportPassesWhenConfigAndCorpusExist(t *testing.T) {
 	cfg := LoadConfig()
 	cfg.LLMBaseURL = "https://example.com/v1"

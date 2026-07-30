@@ -12,6 +12,12 @@ type Config struct {
 	PersistDir           string
 	DefaultMaxSources    int
 	MaxAllowedSources    int
+	EmbeddingEnabled     bool
+	EmbeddingBaseURL     string
+	EmbeddingModel       string
+	EmbeddingAPIKey      string
+	EmbeddingBatchSize   int
+	EmbeddingTimeoutSecs int
 	LLMBaseURL           string
 	LLMModel             string
 	LLMAPIKey            string
@@ -59,6 +65,12 @@ func LoadConfig() Config {
 		PersistDir:           persistDir,
 		DefaultMaxSources:    maxSources,
 		MaxAllowedSources:    maxSources,
+		EmbeddingEnabled:     envBool("HK_INSURANCE_RAG_EMBEDDING_ENABLED", false),
+		EmbeddingBaseURL:     strings.TrimSpace(os.Getenv("HK_INSURANCE_RAG_EMBEDDING_BASE_URL")),
+		EmbeddingModel:       strings.TrimSpace(os.Getenv("HK_INSURANCE_RAG_EMBEDDING_MODEL")),
+		EmbeddingAPIKey:      strings.TrimSpace(os.Getenv("HK_INSURANCE_RAG_EMBEDDING_API_KEY")),
+		EmbeddingBatchSize:   envInt("HK_INSURANCE_RAG_EMBEDDING_BATCH_SIZE", 16),
+		EmbeddingTimeoutSecs: envInt("HK_INSURANCE_RAG_EMBEDDING_TIMEOUT_SECONDS", 120),
 		LLMBaseURL:           strings.TrimSpace(os.Getenv("HK_INSURANCE_RAG_LLM_BASE_URL")),
 		LLMModel:             strings.TrimSpace(os.Getenv("HK_INSURANCE_RAG_LLM_MODEL")),
 		LLMAPIKey:            strings.TrimSpace(os.Getenv("HK_INSURANCE_RAG_LLM_API_KEY")),
