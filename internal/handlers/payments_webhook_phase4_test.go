@@ -186,3 +186,100 @@ func TestPhase4WebhookOrderLookupDBErrorReturns500(t *testing.T) {
 		t.Fatalf("expected 500, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// Back-fill-failure recovery: order AND quote both start with no intent id
+// (the checkout back-fill failed). A succeeded event carrying only the
+// pawrd_order_id/quote metadata must bind BOTH in one go and fulfill; replay
+// is a no-op.
+func TestPhase4WebhookBackfillRecoveryBindsOrderAndQuote(t *testing.T) {
+	const webhookSecret = "whsec_test"
+	db, payload := newSucceededWebhookFixture(t)
+	// Simulate the failed checkout back-fill: neither row knows the intent id.
+	if err := db.Model(&models.ShopOrder{}).
+		Where("id = ?", "11111111-1111-1111-1111-111111111111").
+		Update("payment_intent_id", nil).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.ShopCheckoutQuote{}).
+		Where("id = ?", "22222222-2222-2222-2222-222222222222").
+		Update("payment_intent_id", "").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	fulfiller := &recordingFulfiller{}
+	rec := serveSignedStripeWebhook(t, db, fulfiller, webhookSecret, payload)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !fulfiller.called {
+		t.Fatalf("fulfillment must proceed after the dual back-fill")
+	}
+	if fulfiller.request.PaymentIntentID != "pi_clover_test" {
+		t.Fatalf("unexpected fulfillment intent: %+v", fulfiller.request)
+	}
+
+	var order models.ShopOrder
+	if err := db.First(&order, "id = ?", "11111111-1111-1111-1111-111111111111").Error; err != nil {
+		t.Fatal(err)
+	}
+	if order.PaymentIntentIDValue() != "pi_clover_test" {
+		t.Fatalf("order intent id not back-filled, got %q", order.PaymentIntentIDValue())
+	}
+	var quote models.ShopCheckoutQuote
+	if err := db.First(&quote, "id = ?", "22222222-2222-2222-2222-222222222222").Error; err != nil {
+		t.Fatal(err)
+	}
+	if quote.PaymentIntentID != "pi_clover_test" {
+		t.Fatalf("quote intent id not back-filled, got %q", quote.PaymentIntentID)
+	}
+
+	// Replay: idempotent — no second fulfillment, bindings unchanged.
+	replayFulfiller := &recordingFulfiller{}
+	replay := serveSignedStripeWebhook(t, db, replayFulfiller, webhookSecret, payload)
+	if replay.Code != http.StatusOK {
+		t.Fatalf("replay: expected 200, got %d", replay.Code)
+	}
+	if replayFulfiller.called {
+		t.Fatalf("replay must not fulfill again")
+	}
+}
+
+// Integrity refusal: metadata points at an order already bound to a DIFFERENT
+// intent — no state flip, no back-fill, error so the event is marked failed.
+func TestPhase4WebhookIntegrityRefusalOnConflictingBinding(t *testing.T) {
+	const webhookSecret = "whsec_test"
+	db, payload := newSucceededWebhookFixture(t)
+	// The event claims a different intent id than the order/quote binding.
+	payload = bytes.Replace(payload, []byte(`"id": "pi_clover_test"`), []byte(`"id": "pi_intruder"`), 1)
+
+	fulfiller := &recordingFulfiller{}
+	rec := serveSignedStripeWebhook(t, db, fulfiller, webhookSecret, payload)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for a binding conflict, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if fulfiller.called {
+		t.Fatalf("conflicting intent must never reach fulfillment")
+	}
+
+	var order models.ShopOrder
+	if err := db.First(&order, "id = ?", "11111111-1111-1111-1111-111111111111").Error; err != nil {
+		t.Fatal(err)
+	}
+	if order.PaymentIntentIDValue() != "pi_clover_test" || order.Status != "pending_payment" {
+		t.Fatalf("order must be untouched after integrity refusal: %+v", order)
+	}
+	var quote models.ShopCheckoutQuote
+	if err := db.First(&quote, "id = ?", "22222222-2222-2222-2222-222222222222").Error; err != nil {
+		t.Fatal(err)
+	}
+	if quote.PaymentIntentID != "pi_clover_test" {
+		t.Fatalf("quote must be untouched after integrity refusal, got %q", quote.PaymentIntentID)
+	}
+	var event models.ShopIntegrationEvent
+	if err := db.First(&event, "external_event_id = ?", "evt_clover_test").Error; err != nil {
+		t.Fatal(err)
+	}
+	if event.Status != "failed" {
+		t.Fatalf("integrity refusal must mark the event failed, got %q", event.Status)
+	}
+}

@@ -155,6 +155,14 @@ func createShopQuote(
 	if err := validateHongKongShipping(req.Shipping); err != nil {
 		return ShopQuoteResponse{}, quoteError(http.StatusBadRequest, err.Error())
 	}
+	// Normalize the delivery phone ONCE here; the Shopify request, the sealed
+	// quote snapshot and the persisted order all consume req.Shipping.Phone
+	// downstream, so they all carry the same canonical +852XXXXXXXX value.
+	normalizedShippingPhone, err := normalizeHongKongPhone(req.Shipping.Phone)
+	if err != nil {
+		return ShopQuoteResponse{}, quoteError(http.StatusBadRequest, err.Error())
+	}
+	req.Shipping.Phone = normalizedShippingPhone
 	discountCode := strings.TrimSpace(req.DiscountCode)
 	if len(discountCode) > 255 {
 		return ShopQuoteResponse{}, quoteError(http.StatusBadRequest, "Discount code is too long")

@@ -264,16 +264,84 @@ func findShopOrderForPaymentIntent(db *gorm.DB, pi *stripe.PaymentIntent) (*mode
 		}
 		return nil, err
 	}
+	if err := backfillOrderAndQuotePaymentIntent(db, &order, pi); err != nil {
+		log.Printf("[stripe-webhook] CRITICAL: payment intent binding reconciliation failed order=%s intent=%s: %v",
+			order.ID, paymentIntentID, err)
+		return nil, err
+	}
 	if order.PaymentIntentID == nil {
-		if err := db.Model(&models.ShopOrder{}).
-			Where("id = ? AND payment_intent_id IS NULL", order.ID).
-			Update("payment_intent_id", paymentIntentID).Error; err != nil {
-			log.Printf("[stripe-webhook] CRITICAL: back-fill of payment_intent_id=%s on order %s failed: %v", paymentIntentID, order.ID, err)
-			return nil, err
-		}
 		order.PaymentIntentID = &pi.ID
 	}
 	return &order, nil
+}
+
+var errPaymentIntentBindingConflict = errors.New("payment intent binding conflict")
+
+// backfillOrderAndQuotePaymentIntent closes the reconciliation gap left when
+// the checkout's post-Stripe back-fill failed: in ONE transaction it verifies
+// the metadata quote binding and attaches the intent id to BOTH the order and
+// its consumed quote (only where currently NULL/unset). Any conflicting
+// existing binding (order or quote already bound to a DIFFERENT intent, quote
+// mismatching the order, or a version mismatch) is an integrity error: nothing
+// is applied and nothing is back-filled.
+func backfillOrderAndQuotePaymentIntent(db *gorm.DB, order *models.ShopOrder, pi *stripe.PaymentIntent) error {
+	paymentIntentID := strings.TrimSpace(pi.ID)
+	quoteID := strings.TrimSpace(pi.Metadata["pawrd_quote_id"])
+	quoteVersion := strings.ToLower(strings.TrimSpace(pi.Metadata["pawrd_quote_version"]))
+
+	return db.Transaction(func(tx *gorm.DB) error {
+		var lockedOrder models.ShopOrder
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&lockedOrder, "id = ?", order.ID).Error; err != nil {
+			return err
+		}
+		if lockedOrder.PaymentIntentID != nil && *lockedOrder.PaymentIntentID != paymentIntentID {
+			return fmt.Errorf("%w: order %s is bound to intent %s, not %s",
+				errPaymentIntentBindingConflict, order.ID, *lockedOrder.PaymentIntentID, paymentIntentID)
+		}
+
+		var quote models.ShopCheckoutQuote
+		hasQuote := false
+		if quoteID != "" {
+			if err := tx.Where("id = ?", quoteID).First(&quote).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return fmt.Errorf("%w: metadata quote %s does not exist",
+						errPaymentIntentBindingConflict, quoteID)
+				}
+				return err
+			}
+			if strings.TrimSpace(quote.OrderID) != strings.TrimSpace(order.ID) {
+				return fmt.Errorf("%w: quote %s is bound to order %s, not %s",
+					errPaymentIntentBindingConflict, quoteID, quote.OrderID, order.ID)
+			}
+			if quoteVersion != "" &&
+				!strings.EqualFold(strings.TrimSpace(quote.SnapshotSHA256), quoteVersion) {
+				return fmt.Errorf("%w: quote %s version does not match the payment intent metadata",
+					errPaymentIntentBindingConflict, quoteID)
+			}
+			if existing := strings.TrimSpace(quote.PaymentIntentID); existing != "" && existing != paymentIntentID {
+				return fmt.Errorf("%w: quote %s is bound to intent %s, not %s",
+					errPaymentIntentBindingConflict, quoteID, existing, paymentIntentID)
+			}
+			hasQuote = true
+		}
+
+		if lockedOrder.PaymentIntentID == nil {
+			if err := tx.Model(&models.ShopOrder{}).
+				Where("id = ? AND payment_intent_id IS NULL", order.ID).
+				Update("payment_intent_id", paymentIntentID).Error; err != nil {
+				return err
+			}
+		}
+		if hasQuote && strings.TrimSpace(quote.PaymentIntentID) == "" {
+			if err := tx.Model(&models.ShopCheckoutQuote{}).
+				Where("id = ? AND (payment_intent_id IS NULL OR payment_intent_id = '')", quote.ID).
+				Update("payment_intent_id", paymentIntentID).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // safeStripeFailureReason extracts a display-safe failure reason from the

@@ -298,8 +298,94 @@ func TestPhase4QuoteCustomerServerAuthoritativeAndPhoneQuarantined(t *testing.T)
 	if strings.Contains(record.SnapshotJSON, "phone-not-set-") || strings.Contains(record.SnapshotJSON, "bogus@evil.example") {
 		t.Fatalf("quarantine breach in sealed snapshot: %s", record.SnapshotJSON)
 	}
-	// The shipping phone is the per-order override and stays intact.
-	if snapshot.Shipping.Phone != "61234567" {
-		t.Fatalf("shipping phone must be preserved, got %q", snapshot.Shipping.Phone)
+	// The shipping phone is the per-order override, preserved in canonical form.
+	if snapshot.Shipping.Phone != "+85261234567" {
+		t.Fatalf("shipping phone must be preserved in canonical form, got %q", snapshot.Shipping.Phone)
+	}
+}
+
+// Phone normalization matrix: raw variants all normalize to the canonical
+// +852XXXXXXXX in the Shopify request, the sealed quote snapshot AND the
+// persisted ShopOrder.
+func TestPhase4ShippingPhoneNormalizedAcrossPipeline(t *testing.T) {
+	inputs := []string{"61234567", "6123 4567", "+852 6123 4567"}
+	for _, input := range inputs {
+		t.Run(input, func(t *testing.T) {
+			db := newShopFlowTestDB(t, true)
+			token, _, cfg := shopFlowAuth(t, db, "alice@example.com")
+			initial, selected := handlerTestStorefrontQuotes()
+			client := &fakeStorefrontQuoteClient{initial: initial, selected: selected}
+			quoteHandler := newShopQuoteHandler(
+				cfg,
+				db,
+				func(*config.Config) (shopify.StorefrontQuoteClient, error) { return client, nil },
+				time.Now,
+			)
+
+			createRec := performShopFlowRequest(t, quoteHandler, token, ShopQuoteRequest{
+				LineItems: []ShopCheckoutLineItemRequest{{
+					Source: "shopify", VariantID: "gid://shopify/ProductVariant/1", Quantity: 1,
+				}},
+				Customer: ShopCheckoutCustomerRequest{Name: "Alice", Email: "alice@example.com"},
+				Shipping: ShopCheckoutShippingRequest{
+					RecipientName: "Alice Test", Phone: input,
+					Address1: "1 Test Street", District: "Wan Chai",
+					Region: "Hong Kong Island",
+				},
+			})
+			if createRec.Code != http.StatusOK {
+				t.Fatalf("create quote status=%d body=%s", createRec.Code, createRec.Body.String())
+			}
+			var created ShopQuoteResponse
+			if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+				t.Fatal(err)
+			}
+			if client.createRequest.Shipping.Phone != "+85261234567" {
+				t.Fatalf("Shopify request phone not normalized, got %q", client.createRequest.Shipping.Phone)
+			}
+
+			selectRec := performShopFlowRequest(t, quoteHandler, token, ShopQuoteRequest{
+				QuoteID: created.QuoteID, Version: created.Version,
+				SelectedDeliveryOptionHandle: "standard-hk",
+			})
+			if selectRec.Code != http.StatusOK {
+				t.Fatalf("select delivery status=%d body=%s", selectRec.Code, selectRec.Body.String())
+			}
+
+			var quote models.ShopCheckoutQuote
+			if err := db.First(&quote, "id = ?", created.QuoteID).Error; err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := quote.DecodeAndVerifySnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Shipping.Phone != "+85261234567" {
+				t.Fatalf("sealed snapshot phone not normalized, got %q", snapshot.Shipping.Phone)
+			}
+
+			paymentService := &fakeCheckoutPayments{}
+			sheetHandler := newShopPaymentSheetHandler(
+				cfg,
+				db,
+				func(*config.Config) (checkoutPaymentService, error) { return paymentService, nil },
+				time.Now,
+			)
+			sheetRec := performShopFlowRequest(t, sheetHandler, token, ShopPaymentSheetRequest{QuoteID: created.QuoteID})
+			if sheetRec.Code != http.StatusOK {
+				t.Fatalf("payment sheet status=%d body=%s", sheetRec.Code, sheetRec.Body.String())
+			}
+			var sheetResp ShopPaymentSheetResponse
+			if err := json.Unmarshal(sheetRec.Body.Bytes(), &sheetResp); err != nil {
+				t.Fatal(err)
+			}
+			var order models.ShopOrder
+			if err := db.First(&order, "id = ?", sheetResp.OrderID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if order.CustomerPhone != "+85261234567" {
+				t.Fatalf("order phone not normalized, got %q", order.CustomerPhone)
+			}
+		})
 	}
 }
